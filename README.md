@@ -7,17 +7,39 @@ USB via **libusb** — senza kext, senza DriverKit, nativo arm64.
 
 ## Stato
 
-**Fase 0 — analisi.** Vedi [`ANALYSIS.md`](ANALYSIS.md).
+- **Fase 0 — analisi**: completata. Vedi [`ANALYSIS.md`](ANALYSIS.md).
+- **M1 — Enumerazione USB**: codice scritto, **in attesa di verifica su hardware reale**.
 
 Conclusione chiave dell'analisi: `irda.c` di libdivecomputer delega tutto lo stack IrDA
 al sistema operativo (`AF_IRDA`/`SOCK_STREAM` = TinyTP). Su macOS quello stack non esiste,
-quindi vanno reimplementati in userspace **IrLAP + IrLMP + IrTTP**. Nessuna
-implementazione è ancora iniziata: si attende conferma su linguaggio e licenza.
+quindi vanno reimplementati in userspace **IrLAP + IrLMP + IrTTP**.
 
-## Struttura prevista (dal brief §7)
+Linguaggio: **Rust** (binding libusb `rusb`). Licenza: **GPL-2.0-only**.
 
-`usb/` (trasporto libusb) · `sir/` (framing async + CRC) · `irlap/` · `irlmp/` · `ttp/`
-(TinyTP) · `smart/` (protocollo applicativo Uwatec) · `main`.
+## Build ed esecuzione
+
+```sh
+cargo build --release          # libusb è compilato staticamente (feature "vendored")
+cargo test                     # unit test SIR/CRC, non richiedono hardware
+./target/release/stir4200      # M1: enumera il dongle 066F:4200
+./target/release/stir4200 -v   # con logging di debug (hex dump dei frame)
+```
+
+Su macOS, se il dispositivo non viene trovato, controllare che sia collegato con
+`system_profiler SPUSBDataType` o `ioreg -p IOUSB`.
+
+### Criterio di accettazione M1
+
+`stir4200` apre `066F:4200`, ne rivendica l'interfaccia e stampa l'albero dei
+descrittori (device, configurazioni, endpoint), segnalando se gli endpoint bulk
+corrispondono a quelli attesi dal driver Linux (OUT ep 1, IN ep 2). Il `bcdDevice`
+viene stampato in evidenza per verificare l'applicabilità dei valori dei registri (§6).
+
+## Struttura (dal brief §7)
+
+`src/usb/` (trasporto libusb, M1) · `src/sir/` (framing async + CRC; per ora solo il
+CRC-CCITT con unit test) · `src/logging.rs` (verbosità + hex dump) · `src/main.rs` (CLI).
+In arrivo: `irlap/` · `irlmp/` · `ttp/` (TinyTP) · `smart/` (protocollo Uwatec).
 
 ## Licenza
 

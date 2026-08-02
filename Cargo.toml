@@ -1,0 +1,19 @@
+[package]
+name = "stir4200"
+version = "0.1.0"
+edition = "2021"
+description = "Userspace tool to download dives from Uwatec Galileo via SigmaTel STIr4200 IrDA dongle on macOS"
+license = "GPL-2.0-only"
+rust-version = "1.74"
+
+[[bin]]
+name = "stir4200"
+path = "src/main.rs"
+
+[dependencies]
+# libusb binding. `vendored` builds a bundled libusb from source, so the tool
+# has no external system dependency (works on macOS Apple Silicon and in CI).
+rusb = { version = "0.9", features = ["vendored"] }
+
+[profile.release]
+opt-level = 3
