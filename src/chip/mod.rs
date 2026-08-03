@@ -161,22 +161,31 @@ pub fn run_init(vid: u16, pid: u16, speed: u32) -> Result<(), Box<dyn std::error
     let stir = Stir::new(&handle);
     stir.change_speed(speed)?;
 
-    // Read back the registers that should hold a stable value and compare.
+    // Read back the registers that should hold a stable value and compare only
+    // the *writable* bits. `mask` selects the bits we actually control; the
+    // rest are read-only revision/status bits (e.g. CTRL2's low bits carry the
+    // chip REVID and read back independently of what we write).
     println!();
     println!("Register read-back (written vs read):");
     let expected = [
-        ("PDCLK", REG_PDCLK, pdclk_for(speed).unwrap()),
-        ("MODE", REG_MODE, mode_for(speed)),
-        ("CTRL2", REG_CTRL2, (stir.rx_sensitivity & 7) << 5),
+        // (name, reg, expected_value, writable_mask)
+        ("PDCLK", REG_PDCLK, pdclk_for(speed).unwrap(), 0xffu8),
+        ("MODE", REG_MODE, mode_for(speed), 0xff),
+        ("CTRL2", REG_CTRL2, (stir.rx_sensitivity & 7) << 5, 0xE0),
     ];
     let mut all_ok = true;
-    for (name, reg, exp) in expected {
+    for (name, reg, exp, mask) in expected {
         match stir.read_reg(reg) {
             Ok(v) => {
-                let ok = v == exp;
+                let ok = (v & mask) == (exp & mask);
                 all_ok &= ok;
+                let note = if mask != 0xff {
+                    format!(" (writable bits 0x{mask:02x})")
+                } else {
+                    String::new()
+                };
                 println!(
-                    "  {name:<6} (reg {reg:>2}): wrote 0x{exp:02x}, read 0x{v:02x}  {}",
+                    "  {name:<6} (reg {reg:>2}): wrote 0x{exp:02x}, read 0x{v:02x}  {}{note}",
                     if ok { "OK" } else { "MISMATCH" }
                 );
             }

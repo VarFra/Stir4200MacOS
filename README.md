@@ -9,7 +9,8 @@ USB via **libusb** — senza kext, senza DriverKit, nativo arm64.
 
 - **Fase 0 — analisi**: completata. Vedi [`ANALYSIS.md`](ANALYSIS.md).
 - **M1 — Enumerazione USB**: ✅ verificato su hardware (vedi [`NOTES.md`](NOTES.md)).
-- **M2 — Init e registri**: codice scritto (`stir4200 init`), **in attesa di verifica**.
+- **M2 — Init e registri**: ✅ verificato su hardware (baudrate 9600, registri OK).
+- **M3 — Trasmissione grezza**: prossimo passo.
 
 Conclusione chiave dell'analisi: `irda.c` di libdivecomputer delega tutto lo stack IrDA
 al sistema operativo (`AF_IRDA`/`SOCK_STREAM` = TinyTP). Su macOS quello stack non esiste,

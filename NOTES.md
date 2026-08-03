@@ -24,10 +24,31 @@ Dongle reale, output di `stir4200 -v`:
 Conseguenze pratiche per i livelli successivi: endpoint bulk `0x01`/`0x82`, pacchetti USB
 da 64 byte, transfer di controllo sull'endpoint 0 per i registri.
 
+## M2 — Init e registri (verificato su hardware)
+
+`stir4200 init -v` a 9600 SIR. Sequenza di scrittura eseguita senza errori USB
+(reg 3=0x01, 8=0x15, 2=0x77, 1=0x2a, 3=0x80, 3=0x00, 4=0x20). Read-back:
+
+- **PDCLK (reg 2)**: scritto `0x77`, riletto `0x77` → OK (registro pienamente leggibile/scrivibile).
+- **MODE (reg 1)**: scritto `0x2a`, riletto `0x2a` → OK.
+- **CTRL2 (reg 4)**: scritto `0x20`, riletto **`0x27`**. Non è un errore:
+  - i 3 bit alti (`0xE0`, campo *rx sensitivity*) rileggono `0x20` = valore scritto → OK;
+  - i bit bassi sono **read-only**: `CTRL2_REVID (0x03)` = **revisione chip 3**, più il
+    bit `0x04` acceso (stato read-only non nominato nell'enum del driver; `SPWIDTH=0x08`
+    è spento). Quindi `0x27 = 0x20 (scritto) | 0x07 (read-only)`.
+  - **Lezione**: verificare solo i **bit scrivibili** di ogni registro. Il codice ora
+    confronta con una maschera (`CTRL2` → `0xE0`). Con questa correzione M2 è **OK**.
+- **FIFO status (reg 5-7, lettura multi-registro)**: `ctl=0x04` = `FIFOCTL_EMPTY`,
+  direzione RX, `count=0`. Stato idle corretto; il path di lettura a 3 registri (l'unico
+  che il driver Linux usa davvero) **funziona**.
+
+**Conclusione M2**: meccanismo di I/O sui registri pienamente funzionante, baudrate
+impostato, FIFO leggibile. `REVID = 3` per questo esemplare (bcdDevice 0.0.8).
+
 ## Aperti da chiarire (dall'analisi, vedi ANALYSIS.md §"Rischi/aperti")
 
 - [x] Numeri di endpoint bulk reali (OUT `0x01`/IN `0x82`) e `bNumEndpoints` (2) — M1.
-- [~] `bcdDevice=0.0.8` noto (M1); bit `REVID` (CTRL2) del chip ancora da leggere (M2).
+- [x] `bcdDevice=0.0.8` (M1); `REVID` (CTRL2 & 0x03) = **3** letto a M2.
 - [ ] L'header `0x55 0xAA len_lo len_hi` è richiesto anche in SIR? È presente anche in
       ricezione o la RX è uno stream async "nudo"? (M3/M4).
 - [x] macOS **non** aggancia lo STIr4200: claim diretto OK, nessun kext da rilasciare (M1).
