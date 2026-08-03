@@ -8,7 +8,8 @@ USB via **libusb** — senza kext, senza DriverKit, nativo arm64.
 ## Stato
 
 - **Fase 0 — analisi**: completata. Vedi [`ANALYSIS.md`](ANALYSIS.md).
-- **M1 — Enumerazione USB**: codice scritto, **in attesa di verifica su hardware reale**.
+- **M1 — Enumerazione USB**: ✅ verificato su hardware (vedi [`NOTES.md`](NOTES.md)).
+- **M2 — Init e registri**: codice scritto (`stir4200 init`), **in attesa di verifica**.
 
 Conclusione chiave dell'analisi: `irda.c` di libdivecomputer delega tutto lo stack IrDA
 al sistema operativo (`AF_IRDA`/`SOCK_STREAM` = TinyTP). Su macOS quello stack non esiste,
@@ -21,8 +22,9 @@ Linguaggio: **Rust** (binding libusb `rusb`). Licenza: **GPL-2.0-only**.
 ```sh
 cargo build --release          # libusb è compilato staticamente (feature "vendored")
 cargo test                     # unit test SIR/CRC, non richiedono hardware
-./target/release/stir4200      # M1: enumera il dongle 066F:4200
-./target/release/stir4200 -v   # con logging di debug (hex dump dei frame)
+./target/release/stir4200          # M1: enumera il dongle 066F:4200
+./target/release/stir4200 -v       # con logging di debug (hex dump dei frame)
+./target/release/stir4200 init -v  # M2: reset + baudrate 9600 + rilettura registri
 ```
 
 Su macOS, se il dispositivo non viene trovato, controllare che sia collegato con

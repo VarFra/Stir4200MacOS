@@ -221,6 +221,28 @@ pub fn open_and_claim(
     Ok(handle)
 }
 
+/// Open and claim the device, returning the handle and the claimed interface
+/// number. Shared entry point for M2 and later milestones (no descriptor dump).
+pub fn open_claimed(
+    vid: u16,
+    pid: u16,
+) -> Result<(DeviceHandle<Context>, u8), Box<dyn std::error::Error>> {
+    let ctx = Context::new()
+        .map_err(|e| format!("failed to initialize libusb: {e}"))?;
+    let device = find_device(&ctx, vid, pid)?
+        .ok_or_else(|| format!("device {vid:04x}:{pid:04x} not found (is the dongle plugged in?)"))?;
+
+    // Interface number from the first configuration (STIr4200 has just one).
+    let interface = device
+        .config_descriptor(0)
+        .ok()
+        .and_then(|c| c.interfaces().next().map(|i| i.number()))
+        .unwrap_or(0);
+
+    let handle = open_and_claim(&device, interface)?;
+    Ok((handle, interface))
+}
+
 /// M1 entry point: enumerate, describe, claim, and report.
 pub fn run_enumeration(vid: u16, pid: u16) -> Result<(), Box<dyn std::error::Error>> {
     info!("looking for USB device {vid:04x}:{pid:04x}");
