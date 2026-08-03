@@ -210,13 +210,15 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
     let maxdepth = u16_le(rec, header.maxdepth) as f64 * (BAR / 1000.0) / (density * 10.0);
     let temp_min = (u16_le(rec, header.temp_minimum) as i16) as f64 / 10.0;
 
-    // Gas mixes (Galileo header only; trimix reports them via MISC samples).
-    let mut gasmixes = Vec::new();
+    // Gas mixes. Galileo-mode dives carry them in the header; trimix-mode dives
+    // report them via MISC samples (parsed in the loop below). Tracked as
+    // (mixid, o2 fraction, he fraction), de-duplicated by mixid.
+    let mut mixes: Vec<(u32, f64, f64)> = Vec::new();
     if let Some(gm) = header.gasmix {
         for i in 0..header.ngases {
             let o2 = u16_le(rec, gm + i * 2);
             if o2 != 0 {
-                gasmixes.push((o2 as f64 / 100.0, 0.0));
+                mixes.push((i as u32, o2 as f64 / 100.0, 0.0));
             }
         }
     }
@@ -315,9 +317,23 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
             Time => complete = value,
             Apnea => offset += 8,
             Misc => {
-                if value >= 1 {
-                    offset += value as usize - 1;
+                // MISC payload: [subtype][.. n-1 bytes ..]; `value` = n.
+                let len = value as usize;
+                if len < 1 || offset + len - 1 > n {
+                    break; // incomplete
                 }
+                let subtype = rec[offset];
+                // subtypes 32..=41 describe gas mix `subtype-32` (o2, he, and
+                // begin/end tank pressures) — `uwatec_smart_parser.c:1095`.
+                if (32..=41).contains(&subtype) && len >= 16 {
+                    let mixid = (subtype - 32) as u32;
+                    let o2 = u16_le(rec, offset + 1);
+                    let he = u16_le(rec, offset + 3);
+                    if (o2 != 0 || he != 0) && !mixes.iter().any(|m| m.0 == mixid) {
+                        mixes.push((mixid, o2 as f64 / 100.0, he as f64 / 100.0));
+                    }
+                }
+                offset += len - 1;
             }
             // Rbt / Heartrate / Bearing / Alarms: consumed, no profile point.
             _ => {}
@@ -344,6 +360,9 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
             complete -= 1;
         }
     }
+
+    mixes.sort_by_key(|m| m.0);
+    let gasmixes = mixes.iter().map(|m| (m.1, m.2)).collect();
 
     Ok(Dive {
         unix_time,
@@ -443,6 +462,19 @@ fn write_xml(dives: &[Dive], model_name: &str) -> String {
     out
 }
 
+/// Human-readable gas label (air / nitrox / trimix) from O2/He fractions.
+fn gas_label(o2: f64, he: f64) -> String {
+    let o2p = (o2 * 100.0).round() as i32;
+    let hep = (he * 100.0).round() as i32;
+    if hep > 0 {
+        format!("Tx{o2p}/{hep}")
+    } else if o2p == 21 || o2p == 0 {
+        "air".to_string()
+    } else {
+        format!("Nx{o2p}")
+    }
+}
+
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -481,6 +513,14 @@ pub fn run_parse(
                     if dive.salinity_gl >= 1025 { "salt " } else { "fresh" },
                     dive.samples.len()
                 );
+                if !dive.gasmixes.is_empty() {
+                    let gases: Vec<String> = dive
+                        .gasmixes
+                        .iter()
+                        .map(|(o2, he)| gas_label(*o2, *he))
+                        .collect();
+                    println!("           gas: {}", gases.join(", "));
+                }
                 dives.push(dive);
             }
             Err(e) => eprintln!("  dive {}: parse error: {e}", i + 1),

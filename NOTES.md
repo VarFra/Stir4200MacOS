@@ -168,6 +168,21 @@ lungo. Con la riga di progresso live si vede l'avanzamento senza `-v`.
 Il dump grezzo contiene le immersioni delimitate dal marker `A5 A5 5A 5A` + 4 byte LE di
 lunghezza (`uwatec_smart.c:716-738`). Prossimo: M8 (parsing ed export per Subsurface).
 
+## M8 — Parsing/export (rifiniture da verifica reale su Galileo Trimix)
+
+Sul dispositivo reale (model 0x19) emersi alcuni punti, corretti:
+
+- **Salinità**: la rilevavamo (bit SALINITY) ma non la esportavamo. Ora l'attributo
+  `salinity='NNN g/l'` sul `<divecomputer>` (salata 1025, dolce 1000), formato verificato
+  su `save-xml.cpp`/`membuffer.cpp` di Subsurface.
+- **Miscele gas**: per le immersioni in **modalità trimix** (header 84, `data[43]&0x80`) i
+  gas non sono nell'header (UNSUPPORTED) ma nei **campioni MISC** (subtype 32–41: mixid,
+  O₂, He, pressioni). Ora li estraiamo (`uwatec_smart_parser.c:1095`) e li emettiamo come
+  `<cylinder>`. Le immersioni "galileo" (header 152) prendono i gas dall'header come prima.
+- **Profondità max "22 vs 22.4"**: il nostro XML è corretto (`22.36 m` ≈ 22.4); il "22"
+  mostrato da Subsurface resta un comportamento lato Subsurface da chiarire con `dump.bin`
+  reale (aperto, puramente estetico).
+
 ## Aperti da chiarire (dall'analisi, vedi ANALYSIS.md §"Rischi/aperti")
 
 - [x] Numeri di endpoint bulk reali (OUT `0x01`/IN `0x82`) e `bNumEndpoints` (2) — M1.
