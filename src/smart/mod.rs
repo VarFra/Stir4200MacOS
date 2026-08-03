@@ -10,6 +10,8 @@
 //! See ANALYSIS.md §5–§6. Frame layouts/constants are taken from the Linux
 //! sources; nothing is guessed.
 
+use std::time::{Duration, Instant};
+
 use crate::chip::Stir;
 use crate::irlap::{self, IrlapLink};
 
@@ -211,9 +213,26 @@ impl Ttp {
         stir: &Stir,
         n: usize,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let start_len = self.rx.len();
+        use std::io::Write;
+
         let mut misses = 0u32;
-        let mut next_report = start_len + 16384;
+        // Show a live, single-line progress bar for large transfers only.
+        let show_progress = n > 4096;
+        let started = Instant::now();
+        let mut last_print = Instant::now();
+
+        let print_progress = |got: usize, final_: bool| {
+            let secs = started.elapsed().as_secs_f64().max(0.001);
+            let rate = got as f64 / secs;
+            eprint!(
+                "\r  {got} / {n} bytes ({:.1}%)  {:.0} B/s  {:.0}s{}",
+                100.0 * got as f64 / n as f64,
+                rate,
+                secs,
+                if final_ { "        \n" } else { "        " }
+            );
+            let _ = std::io::stderr().flush();
+        };
 
         while self.rx.len() < n {
             // Keep the device's credit topped up. A give-credit I-frame both
@@ -243,19 +262,25 @@ impl Ttp {
                 None => misses += 1,
             }
 
-            if self.rx.len() >= next_report {
-                println!("  received {} / {n} bytes...", self.rx.len());
-                next_report += 16384;
+            if show_progress && last_print.elapsed() >= Duration::from_millis(500) {
+                print_progress(self.rx.len(), false);
+                last_print = Instant::now();
             }
 
             // ~2000 empty polls (~1 minute at 9600) with no data = give up.
             if misses > 2000 {
+                if show_progress {
+                    print_progress(self.rx.len(), true);
+                }
                 return Err(format!(
                     "device stopped sending after {} of {n} bytes",
                     self.rx.len()
                 )
                 .into());
             }
+        }
+        if show_progress {
+            print_progress(self.rx.len(), true);
         }
         Ok(self.rx.drain(..n).collect())
     }
