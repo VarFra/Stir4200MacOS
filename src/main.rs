@@ -9,6 +9,7 @@ pub mod chip;
 pub mod irlap;
 pub mod sir;
 pub mod smart;
+pub mod subsurface;
 pub mod usb;
 
 use logging::Level;
@@ -34,6 +35,7 @@ COMMANDS:
                          with RR keepalives.
     download             M7: connect, run the Uwatec Smart protocol, and save the
                          raw dive memory to a file (--out).
+    parse                M8: parse a raw dump (--in) into Subsurface XML (--out).
 
 OPTIONS:
     -v, --verbose        increase verbosity (repeatable: -v, -vv, -vvv)
@@ -44,7 +46,9 @@ OPTIONS:
                          (default 20 for `rx`, 30 for `connect`)
         --slots N        discovery slots: 1/6/8/16 (default 1)
         --retries N      discovery attempts (default 3)
-    -o, --out FILE       output file for `download` (default dump.bin)
+    -o, --out FILE       output file: dump for `download` (default dump.bin),
+                         XML for `parse` (default dives.xml)
+    -i, --in FILE        input dump for `parse` (default dump.bin)
     -h, --help           show this help
 ";
 
@@ -57,6 +61,7 @@ enum Command {
     Discover,
     Connect,
     Download,
+    Parse,
 }
 
 struct Args {
@@ -68,7 +73,8 @@ struct Args {
     seconds: Option<u64>,
     slots: u8,
     retries: u32,
-    out: String,
+    out: Option<String>,
+    input: String,
     command: Command,
 }
 
@@ -81,7 +87,8 @@ fn parse_args() -> Result<Args, String> {
     let mut seconds: Option<u64> = None;
     let mut slots: u8 = 1;
     let mut retries: u32 = 3;
-    let mut out = String::from("dump.bin");
+    let mut out: Option<String> = None;
+    let mut input = String::from("dump.bin");
     let mut command = Command::Enumerate;
     let mut verbosity: u8 = 0;
 
@@ -134,9 +141,15 @@ fn parse_args() -> Result<Args, String> {
                 retries = r.parse().map_err(|_| format!("bad retries '{r}'"))?;
             }
             "-o" | "--out" => {
-                out = it
+                out = Some(
+                    it.next()
+                        .ok_or_else(|| "--out requires a file path".to_string())?,
+                );
+            }
+            "-i" | "--in" => {
+                input = it
                     .next()
-                    .ok_or_else(|| "--out requires a file path".to_string())?;
+                    .ok_or_else(|| "--in requires a file path".to_string())?;
             }
             "enumerate" => command = Command::Enumerate,
             "init" => command = Command::Init,
@@ -145,6 +158,7 @@ fn parse_args() -> Result<Args, String> {
             "discover" => command = Command::Discover,
             "connect" => command = Command::Connect,
             "download" => command = Command::Download,
+            "parse" => command = Command::Parse,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -165,6 +179,7 @@ fn parse_args() -> Result<Args, String> {
         slots,
         retries,
         out,
+        input,
         command,
     })
 }
@@ -201,7 +216,17 @@ fn main() {
         Command::Connect => {
             irlap::run_connect(args.vid, args.pid, args.speed, args.seconds.unwrap_or(30))
         }
-        Command::Download => smart::run_download(args.vid, args.pid, args.speed, &args.out),
+        Command::Download => smart::run_download(
+            args.vid,
+            args.pid,
+            args.speed,
+            args.out.as_deref().unwrap_or("dump.bin"),
+        ),
+        Command::Parse => subsurface::run_parse(
+            &args.input,
+            args.out.as_deref().unwrap_or("dives.xml"),
+            "Uwatec Galileo",
+        ),
     };
     if let Err(e) = result {
         error!("{e}");

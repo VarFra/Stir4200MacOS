@@ -15,7 +15,7 @@ USB via **libusb** — senza kext, senza DriverKit, nativo arm64.
 - **M5 — Discovery IrLAP**: ✅ verificato su hardware (il Galileo risponde: "UWATEC Galileo").
 - **M6 — Connessione IrLAP (SNRM/UA + keepalive)**: ✅ verificato (382/382 poll, gap 0 — timing risolto).
 - **M7 — Protocollo Uwatec Smart (IrLMP+TinyTP)**: ✅ verificato (scaricati 287612 byte su file).
-- **M8 — Parsing ed esportazione per Subsurface**: in corso.
+- **M8 — Parsing ed esportazione per Subsurface**: codice scritto (`stir4200 parse`), **in attesa di verifica**.
 
 Conclusione chiave dell'analisi: `irda.c` di libdivecomputer delega tutto lo stack IrDA
 al sistema operativo (`AF_IRDA`/`SOCK_STREAM` = TinyTP). Su macOS quello stack non esiste,
@@ -36,6 +36,7 @@ cargo test                     # unit test SIR/CRC, non richiedono hardware
 ./target/release/stir4200 discover -v  # M5: discovery IrLAP (XID) del computer subacqueo
 ./target/release/stir4200 connect -v   # M6: connessione IrLAP (SNRM/UA) + keepalive 30s
 ./target/release/stir4200 download -o dump.bin  # M7: scarica la memoria immersioni su file
+./target/release/stir4200 parse -i dump.bin -o dives.xml  # M8: converte il dump in XML Subsurface
 ```
 
 Su macOS, se il dispositivo non viene trovato, controllare che sia collegato con
