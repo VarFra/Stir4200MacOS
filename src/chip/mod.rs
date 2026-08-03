@@ -169,6 +169,24 @@ impl<'a> Stir<'a> {
     pub fn read_bulk_in(&self, buf: &mut [u8], timeout: Duration) -> rusb::Result<usize> {
         self.handle.read_bulk(EP_BULK_IN, buf, timeout)
     }
+
+    /// Wait for the transmit FIFO to drain, so we can turn the half-duplex link
+    /// around and receive. Mirrors the driver's drain condition
+    /// (`stir4200.c:614-617`): done when the FIFO direction is no longer TX, or
+    /// the FIFO is empty. Best-effort, bounded by `max`.
+    pub fn fifo_drain(&self, max: Duration) -> rusb::Result<()> {
+        let deadline = Instant::now() + max;
+        loop {
+            let (ctl, _count) = self.fifo_status()?;
+            if ctl & FIFOCTL_DIR == 0 || ctl & FIFOCTL_EMPTY != 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
 }
 
 /// M2 entry point: reset the chip, set the baud rate, and verify by reading

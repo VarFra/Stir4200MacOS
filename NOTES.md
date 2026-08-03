@@ -64,12 +64,36 @@ c1                                   EOF
 corretti in trasmissione**. L'header `0x55 0xAA len len` è quindi richiesto/accettato
 anche in SIR (resta da vedere la RX a M4).
 
+## M4 — Ricezione grezza (verificato su hardware)
+
+`stir4200 rx -v` a 9600: con un **telecomando TV** avvicinato, arrivano **1328 byte
+grezzi**, 0 frame validi, 0 errori CRC, **nessun crash**. → path di RX funzionante e
+scarto dei frame malformati OK. Criterio M4 soddisfatto.
+
+Scoperte sul comportamento reale della RX:
+
+- Il bulk IN restituisce i dati in **transfer molto piccoli (1 byte alla volta)** in questo
+  scenario, non in blocchi. Va bene per il loop di polling; da tenere presente per il
+  timing di M5/M6.
+- Dal telecomando arrivano prevalentemente byte **`0xFF`**. In SIR `0xFF = XBOF`, quindi il
+  de-wrapper li ignora correttamente come "fuori frame" (nessun frame spurio).
+- **Non è emerso alcun header/byte di stato del chip in ricezione**: lo stream RX sembra
+  essere async "nudo" (coerente col driver Linux che passa i byte del bulk IN direttamente
+  al de-wrapper). Da riconfermare con frame veri IrDA a M5.
+
+**Il computer subacqueo non produce byte da solo** (confermato dal manuale: l'interfaccia
+IR del Galileo si attiva solo quando *sente* una trasmissione). → è **atteso**: il Galileo
+risponde alla discovery IrLAP (XID), non trasmette spontaneamente. La ricezione dal
+dispositivo si potrà verificare solo da M5 in poi (dopo aver inviato noi la discovery).
+Implica che M5 deve fare **TX (XID) → turnaround → RX (risposta)** in half-duplex.
+
 ## Aperti da chiarire (dall'analisi, vedi ANALYSIS.md §"Rischi/aperti")
 
 - [x] Numeri di endpoint bulk reali (OUT `0x01`/IN `0x82`) e `bNumEndpoints` (2) — M1.
 - [x] `bcdDevice=0.0.8` (M1); `REVID` (CTRL2 & 0x03) = **3** letto a M2.
-- [ ] L'header `0x55 0xAA len_lo len_hi` è richiesto anche in SIR? È presente anche in
-      ricezione o la RX è uno stream async "nudo"? (M3/M4).
+- [x] L'header `0x55 0xAA len_lo len_hi` è richiesto in SIR **TX** (confermato M3). In
+      **RX** lo stream è async "nudo", nessun header del chip osservato (M4; riconfermare
+      con frame IrDA veri a M5).
 - [x] macOS **non** aggancia lo STIr4200: claim diretto OK, nessun kext da rilasciare (M1).
 - [ ] Vettori di test noti per l'FCS CRC-CCITT (unit test, pre-hardware).
 - [ ] Parametri IrLAP realmente negoziati dal Galileo e latenza round-trip USB misurata

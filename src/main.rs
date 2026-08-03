@@ -6,6 +6,7 @@
 #[macro_use]
 pub mod logging;
 pub mod chip;
+pub mod irlap;
 pub mod sir;
 pub mod usb;
 
@@ -26,13 +27,17 @@ COMMANDS:
                          IR LED can be observed (smartphone camera).
     rx                   M4: poll bulk IN, de-wrap the SIR stream, and report
                          received bytes and frames.
+    discover             M5: send IrLAP XID discovery and report responding
+                         devices (address + nickname).
 
 OPTIONS:
     -v, --verbose        increase verbosity (repeatable: -v, -vv, -vvv)
     -d, --device VID:PID override the USB id (default 066f:4200, hex)
-    -s, --speed BAUD     baud rate for `init`/`tx`/`rx` (default 9600)
+    -s, --speed BAUD     baud rate for `init`/`tx`/`rx`/`discover` (default 9600)
     -c, --count N        number of frames for `tx` (default 100)
     -t, --seconds N      listen duration for `rx` (default 20)
+        --slots N        discovery slots: 1/6/8/16 (default 1)
+        --retries N      discovery attempts (default 3)
     -h, --help           show this help
 ";
 
@@ -42,6 +47,7 @@ enum Command {
     Init,
     Tx,
     Rx,
+    Discover,
 }
 
 struct Args {
@@ -51,6 +57,8 @@ struct Args {
     speed: u32,
     count: u32,
     seconds: u64,
+    slots: u8,
+    retries: u32,
     command: Command,
 }
 
@@ -61,6 +69,8 @@ fn parse_args() -> Result<Args, String> {
     let mut speed: u32 = 9600;
     let mut count: u32 = 100;
     let mut seconds: u64 = 20;
+    let mut slots: u8 = 1;
+    let mut retries: u32 = 3;
     let mut command = Command::Enumerate;
     let mut verbosity: u8 = 0;
 
@@ -100,10 +110,23 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or_else(|| "--seconds requires a number".to_string())?;
                 seconds = t.parse().map_err(|_| format!("bad seconds '{t}'"))?;
             }
+            "--slots" => {
+                let s = it
+                    .next()
+                    .ok_or_else(|| "--slots requires a number".to_string())?;
+                slots = s.parse().map_err(|_| format!("bad slots '{s}'"))?;
+            }
+            "--retries" => {
+                let r = it
+                    .next()
+                    .ok_or_else(|| "--retries requires a number".to_string())?;
+                retries = r.parse().map_err(|_| format!("bad retries '{r}'"))?;
+            }
             "enumerate" => command = Command::Enumerate,
             "init" => command = Command::Init,
             "tx" => command = Command::Tx,
             "rx" => command = Command::Rx,
+            "discover" => command = Command::Discover,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -121,6 +144,8 @@ fn parse_args() -> Result<Args, String> {
         speed,
         count,
         seconds,
+        slots,
+        retries,
         command,
     })
 }
@@ -151,6 +176,9 @@ fn main() {
         Command::Init => chip::run_init(args.vid, args.pid, args.speed),
         Command::Tx => chip::run_tx(args.vid, args.pid, args.speed, args.count),
         Command::Rx => chip::run_rx(args.vid, args.pid, args.speed, args.seconds),
+        Command::Discover => {
+            irlap::run_discovery(args.vid, args.pid, args.speed, args.slots, args.retries)
+        }
     };
     if let Err(e) = result {
         error!("{e}");

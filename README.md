@@ -11,8 +11,9 @@ USB via **libusb** — senza kext, senza DriverKit, nativo arm64.
 - **M1 — Enumerazione USB**: ✅ verificato su hardware (vedi [`NOTES.md`](NOTES.md)).
 - **M2 — Init e registri**: ✅ verificato su hardware (baudrate 9600, registri OK).
 - **M3 — Trasmissione grezza**: ✅ verificato su hardware (frame corretto sul filo, LED IR emette).
-- **M4 — Ricezione grezza**: codice scritto (`stir4200 rx`), **in attesa di verifica**.
-- **M5 — Discovery IrLAP**: prossimo passo (inizio dello stack IrDA vero e proprio).
+- **M4 — Ricezione grezza**: ✅ verificato su hardware (byte ricevuti, nessun crash).
+- **M5 — Discovery IrLAP**: codice scritto (`stir4200 discover`), **in attesa di verifica**.
+- **M6 — Connessione IrLAP/IrLMP/TinyTP**: prossimo passo.
 
 Conclusione chiave dell'analisi: `irda.c` di libdivecomputer delega tutto lo stack IrDA
 al sistema operativo (`AF_IRDA`/`SOCK_STREAM` = TinyTP). Su macOS quello stack non esiste,
@@ -29,7 +30,8 @@ cargo test                     # unit test SIR/CRC, non richiedono hardware
 ./target/release/stir4200 -v       # con logging di debug (hex dump dei frame)
 ./target/release/stir4200 init -v  # M2: reset + baudrate 9600 + rilettura registri
 ./target/release/stir4200 tx -v    # M3: trasmette frame SIR di test (LED IR visibile con fotocamera)
-./target/release/stir4200 rx -v    # M4: ascolta sul bulk IN e de-wrappa lo stream SIR
+./target/release/stir4200 rx -v        # M4: ascolta sul bulk IN e de-wrappa lo stream SIR
+./target/release/stir4200 discover -v  # M5: discovery IrLAP (XID) del computer subacqueo
 ```
 
 Su macOS, se il dispositivo non viene trovato, controllare che sia collegato con
