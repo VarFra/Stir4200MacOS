@@ -132,6 +132,30 @@ Implicazione: si può procedere con M7 (IrLMP + TinyTP + protocollo Uwatec) con 
 Nota: M7 richiede il trasferimento dati con **I-frame** (N(s)/N(r)), non solo le RR
 supervisory di M6.
 
+## M7 — Protocollo Uwatec Smart (in verifica; primo run parziale)
+
+Primo run su hardware: **IrLAP + IrLMP + TinyTP connect + handshake + identità +
+dimensione memoria funzionano**. Si è bloccato durante il download lungo.
+
+Dati reali letti dal dispositivo:
+- `TTP connected to LSAP 1 (send credit 1)` → **il device ci concede solo 1 credito** in
+  invio. Dettaglio cruciale (vedi bug sotto).
+- `model=0x19` → in realtà è un **Uwatec Galileo Trimix** (`descriptor.c:166`), non Sol/Luna,
+  ma stessa famiglia `DC_FAMILY_UWATEC_SMART` → stesso protocollo. hardware=0x11,
+  software=0x51, serial=61040830, devtime=1678128206.
+- `Dive memory size: 287612 bytes` (~281 KB). Grande → il flow-control a crediti è
+  essenziale.
+
+**Bug trovato e corretto (flow-control TTP):** avevo decrementato il nostro `send_credit`
+anche sui frame *give-credit*. Nei sorgenti (`irttp.c`): i PDU **dati** consumano
+`send_credit` (riga 744), ma **give_credit NON lo consuma**; e ricevendo dati si fa
+`send_credit += credito` (riga 918). Con `send credit 1`, dopo pochi rifornimenti restavo
+a 0 → non potevo più concedere credito → il device esauriva il proprio credito e smetteva
+di inviare → loop infinito su RR vuote. **Fix**: i give-credit sono gratuiti; ora tengo il
+credito del device sempre ~127 senza consumare il nostro send-credit. Con dati a 61 byte/PDU
+il download di 281 KB sono ~4700 PDU: a 9600 ci vorranno ~2 minuti (candidato a M8+ per
+negoziare una velocità più alta).
+
 ## Aperti da chiarire (dall'analisi, vedi ANALYSIS.md §"Rischi/aperti")
 
 - [x] Numeri di endpoint bulk reali (OUT `0x01`/IN `0x82`) e `bNumEndpoints` (2) — M1.

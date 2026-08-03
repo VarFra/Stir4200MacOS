@@ -31,8 +31,6 @@ const OUR_LSAP: u8 = 5;
 
 /// Initial TTP credit we grant the device, and the level we keep it topped to.
 const CREDIT_TARGET: i32 = 127;
-/// Replenish the device's credit when it drops below this.
-const CREDIT_LOW: i32 = 16;
 
 // Uwatec Smart commands (`uwatec_smart.c:39-51`).
 const CMD_MODEL: u8 = 0x10;
@@ -200,40 +198,63 @@ impl Ttp {
         Ok(())
     }
 
-    /// Receive exactly `n` application bytes, polling and replenishing credit.
+    /// Receive exactly `n` application bytes.
+    ///
+    /// The device (TTP sender) may only send while it holds credit that *we*
+    /// grant. We keep its credit topped up with give-credit frames. Crucially,
+    /// a give-credit frame carries no SDU and therefore does **not** consume our
+    /// own send credit (`irttp.c` `irttp_give_credit`), so we can always
+    /// replenish regardless of how little credit the device granted us.
     fn recv(
         &mut self,
         link: &mut IrlapLink,
         stir: &Stir,
         n: usize,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let start_len = self.rx.len();
         let mut misses = 0u32;
+        let mut next_report = start_len + 16384;
+
         while self.rx.len() < n {
-            let need_credit = self.remote_credit <= CREDIT_LOW;
-            let (responded, info) = if need_credit && self.send_credit > 0 {
-                // Poll while granting a chunk of credit (give-credit I-frame).
-                let grant = (CREDIT_TARGET - self.remote_credit).clamp(0, 127);
+            // Keep the device's credit topped up. A give-credit I-frame both
+            // grants credit and polls the secondary for its next data frame.
+            let grant = (CREDIT_TARGET - self.remote_credit).clamp(0, 127);
+            let (_responded, info) = if grant > 0 {
                 self.remote_credit += grant;
-                let r = link.transact(stir, Some(&lmp_data(&[grant as u8])))?;
-                self.send_credit -= 1;
-                r
+                link.transact(stir, Some(&lmp_data(&[grant as u8])))?
             } else {
-                // Plain RR poll (free — no TTP PDU, no credit spent).
                 link.transact(stir, None)?
             };
 
-            if let Some(b) = info {
-                let inc = self.parse(&b);
-                if let Incoming::Disconnect = inc {
-                    return Err("device disconnected during transfer".into());
+            match info {
+                Some(b) => {
+                    let inc = self.parse(&b);
+                    if let Incoming::Disconnect = inc {
+                        return Err("device disconnected during transfer".into());
+                    }
+                    let got_data = matches!(&inc, Incoming::Data { data, .. } if !data.is_empty());
+                    self.absorb(&inc);
+                    if got_data {
+                        misses = 0;
+                    } else {
+                        misses += 1;
+                    }
                 }
-                self.absorb(&inc);
-                misses = 0;
-            } else if !responded {
-                misses += 1;
-                if misses > 200 {
-                    return Err("device stopped responding during transfer".into());
-                }
+                None => misses += 1,
+            }
+
+            if self.rx.len() >= next_report {
+                println!("  received {} / {n} bytes...", self.rx.len());
+                next_report += 16384;
+            }
+
+            // ~2000 empty polls (~1 minute at 9600) with no data = give up.
+            if misses > 2000 {
+                return Err(format!(
+                    "device stopped sending after {} of {n} bytes",
+                    self.rx.len()
+                )
+                .into());
             }
         }
         Ok(self.rx.drain(..n).collect())
