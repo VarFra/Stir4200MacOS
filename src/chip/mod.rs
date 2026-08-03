@@ -36,8 +36,10 @@ const CTRL1_SRESET: u8 = 0x01;
 const FIFOCTL_DIR: u8 = 0x10;
 const FIFOCTL_EMPTY: u8 = 0x04;
 
-// The Linux driver uses a 100 ms control timeout (`stir4200.c:78`).
+// The Linux driver uses a 100 ms control timeout (`stir4200.c:78`) and a
+// 200 ms bulk transmit timeout (`stir4200.c:79`).
 const CTRL_TIMEOUT: Duration = Duration::from_millis(100);
+const TRANSMIT_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Bulk endpoint addresses, confirmed on hardware at M1 (see NOTES.md).
 pub const EP_BULK_OUT: u8 = 0x01;
@@ -141,6 +143,25 @@ impl<'a> Stir<'a> {
         self.write_reg(REG_CTRL2, (self.rx_sensitivity & 7) << 5)?; // 7. sensitivity
         Ok(())
     }
+
+    /// Wrap `payload` as a SIR frame, prepend the STIr4200 chip header
+    /// (`0x55 0xAA len_lo len_hi`, `stir4200.c:296-308`), and send it on the
+    /// bulk OUT endpoint. Returns the number of bytes written to USB.
+    pub fn send_sir(&self, payload: &[u8]) -> rusb::Result<usize> {
+        use crate::sir::framing;
+        let frame = framing::async_wrap(payload, framing::DEFAULT_XBOFS);
+        let len = frame.len() as u16;
+
+        let mut buf = Vec::with_capacity(frame.len() + 4);
+        buf.push(0x55);
+        buf.push(0xAA);
+        buf.push((len & 0xff) as u8);
+        buf.push((len >> 8) as u8);
+        buf.extend_from_slice(&frame);
+
+        crate::logging::dump_frame("TX", &buf);
+        self.handle.write_bulk(EP_BULK_OUT, &buf, TRANSMIT_TIMEOUT)
+    }
 }
 
 /// M2 entry point: reset the chip, set the baud rate, and verify by reading
@@ -223,4 +244,60 @@ pub fn run_init(vid: u16, pid: u16, speed: u32) -> Result<(), Box<dyn std::error
     }
 
     Ok(())
+}
+
+/// M3 entry point: repeatedly transmit a wrapped SIR test frame on the bulk OUT
+/// endpoint so the IR LED can be observed emitting (visible as a purple dot
+/// through a smartphone camera). Acceptance: LED emits, no USB errors.
+pub fn run_tx(
+    vid: u16,
+    pid: u16,
+    speed: u32,
+    count: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (handle, iface) = crate::usb::open_claimed(vid, pid)?;
+    println!("Claimed interface {iface}. Setting up SIR at {speed} baud for TX test...");
+
+    let _ = handle.clear_halt(EP_BULK_OUT);
+    let _ = handle.clear_halt(EP_BULK_IN);
+
+    let stir = Stir::new(&handle);
+    stir.change_speed(speed)?;
+
+    // A deliberately awkward payload that exercises the byte-stuffing path
+    // (contains BOF/EOF/CE and the chip-header magic bytes).
+    let payload: [u8; 7] = [0x00, 0xC0, 0xC1, 0x7D, 0xFF, 0x55, 0xAA];
+
+    println!(
+        "Transmitting {count} frame(s). Point a smartphone camera at the dongle's IR window: \
+         a working emission looks like a faint purple/white flicker.\n"
+    );
+
+    let mut errors = 0u32;
+    for i in 1..=count {
+        match stir.send_sir(&payload) {
+            Ok(n) => {
+                if i == 1 || i % 20 == 0 || i == count {
+                    println!("  frame {i}/{count}: wrote {n} bytes to bulk OUT");
+                }
+            }
+            Err(e) => {
+                errors += 1;
+                crate::error!("frame {i}/{count}: USB write error: {e}");
+            }
+        }
+        // Small gap so the FIFO drains and the flicker is observable.
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    println!();
+    if errors == 0 {
+        println!(
+            "M3: sent {count} frame(s) with no USB errors. Confirm visually that the IR LED \
+             emitted (smartphone camera)."
+        );
+        Ok(())
+    } else {
+        Err(format!("M3: {errors}/{count} frames failed to transmit").into())
+    }
 }

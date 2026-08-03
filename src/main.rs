@@ -22,11 +22,14 @@ COMMANDS:
                          descriptor tree and endpoints.
     init                 M2: reset the chip, set the baud rate, and verify the
                          registers by reading them back.
+    tx                   M3: transmit wrapped SIR test frames on bulk OUT so the
+                         IR LED can be observed (smartphone camera).
 
 OPTIONS:
     -v, --verbose        increase verbosity (repeatable: -v, -vv, -vvv)
     -d, --device VID:PID override the USB id (default 066f:4200, hex)
-    -s, --speed BAUD     baud rate for `init` (default 9600)
+    -s, --speed BAUD     baud rate for `init`/`tx` (default 9600)
+    -c, --count N        number of frames for `tx` (default 100)
     -h, --help           show this help
 ";
 
@@ -34,6 +37,7 @@ OPTIONS:
 enum Command {
     Enumerate,
     Init,
+    Tx,
 }
 
 struct Args {
@@ -41,6 +45,7 @@ struct Args {
     vid: u16,
     pid: u16,
     speed: u32,
+    count: u32,
     command: Command,
 }
 
@@ -49,6 +54,7 @@ fn parse_args() -> Result<Args, String> {
     let mut vid = usb::STIR_VID;
     let mut pid = usb::STIR_PID;
     let mut speed: u32 = 9600;
+    let mut count: u32 = 100;
     let mut command = Command::Enumerate;
     let mut verbosity: u8 = 0;
 
@@ -76,8 +82,15 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or_else(|| "--speed requires a BAUD argument".to_string())?;
                 speed = s.parse().map_err(|_| format!("bad speed '{s}'"))?;
             }
+            "-c" | "--count" => {
+                let c = it
+                    .next()
+                    .ok_or_else(|| "--count requires a number".to_string())?;
+                count = c.parse().map_err(|_| format!("bad count '{c}'"))?;
+            }
             "enumerate" => command = Command::Enumerate,
             "init" => command = Command::Init,
+            "tx" => command = Command::Tx,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -93,6 +106,7 @@ fn parse_args() -> Result<Args, String> {
         vid,
         pid,
         speed,
+        count,
         command,
     })
 }
@@ -121,6 +135,7 @@ fn main() {
     let result = match args.command {
         Command::Enumerate => usb::run_enumeration(args.vid, args.pid),
         Command::Init => chip::run_init(args.vid, args.pid, args.speed),
+        Command::Tx => chip::run_tx(args.vid, args.pid, args.speed, args.count),
     };
     if let Err(e) = result {
         error!("{e}");
