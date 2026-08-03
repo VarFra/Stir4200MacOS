@@ -24,6 +24,31 @@ const BROADCAST: u32 = 0xffff_ffff; // broadcast device address
 const HINT_EXTENSION: u8 = 0x80; // "more hint bytes follow"
 const SLOT_FINAL: u8 = 0xff; // final-slot marker
 
+// Connection-management control fields (`irlap_frame.h`).
+const SNRM_CMD: u8 = 0x83;
+const UA_RSP: u8 = 0x63;
+const DISC_CMD: u8 = 0x43;
+const RR: u8 = 0x01;
+
+// QoS negotiation parameter identifiers (`qos.h`), in SNRM insertion order.
+const PI_BAUD_RATE: u8 = 0x01;
+const PI_MAX_TURN_TIME: u8 = 0x82;
+const PI_DATA_SIZE: u8 = 0x83;
+const PI_WINDOW_SIZE: u8 = 0x84;
+const PI_ADD_BOFS: u8 = 0x85;
+const PI_MIN_TURN_TIME: u8 = 0x86;
+const PI_LINK_DISC: u8 = 0x08;
+
+// QoS value tables (`qos.c:103-109`), for decoding the negotiated UA.
+const BAUD_RATES: [u32; 10] = [
+    2400, 9600, 19200, 38400, 57600, 115200, 576000, 1152000, 4000000, 16000000,
+];
+const DATA_SIZES: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
+const ADD_BOFS: [u32; 8] = [48, 24, 12, 5, 3, 2, 1, 0];
+const MAX_TURN_TIMES: [u32; 4] = [500, 250, 100, 50];
+const MIN_TURN_TIMES: [u32; 8] = [10000, 5000, 1000, 500, 100, 50, 10, 0];
+const LINK_DISC_TIMES: [u32; 8] = [3, 8, 12, 16, 20, 25, 30, 40];
+
 /// The fixed part of an XID frame is 14 bytes (`struct xid_frame`).
 const XID_FIXED_LEN: usize = 14;
 
@@ -239,6 +264,294 @@ pub fn run_discovery(
     Ok(())
 }
 
+// ------------------------------------------------------------------------
+// M6 — IrLAP connection (SNRM/UA handshake + NRM keepalive)
+// ------------------------------------------------------------------------
+
+/// The QoS parameters we advertise in the SNRM. Each entry is `(PI, PV)` with a
+/// 1-byte value, in the exact order the Linux stack inserts them
+/// (`qos.c:463-...`). PV is a bitmask over the value tables. We deliberately:
+/// - offer **9600 only** (bit 1) so the link never changes speed mid-session;
+/// - offer **500 ms max turnaround** (bit 0) to give our userspace a generous
+///   turnaround budget;
+/// - offer **window 1** and **data size 64** (simplest, mandatory values);
+/// - offer **any** additional-BOFs / min-turn / link-disconnect so the
+///   negotiation always intersects with whatever the device supports.
+const SNRM_QOS_PARAMS: [(u8, u8); 7] = [
+    (PI_BAUD_RATE, 0x02),     // 9600
+    (PI_MAX_TURN_TIME, 0x01), // 500 ms
+    (PI_DATA_SIZE, 0x01),     // 64 bytes
+    (PI_WINDOW_SIZE, 0x01),   // window 1
+    (PI_ADD_BOFS, 0xff),      // any
+    (PI_MIN_TURN_TIME, 0xff), // any
+    (PI_LINK_DISC, 0xff),     // any
+];
+
+/// Negotiated QoS decoded from a UA (best-effort, for logging).
+#[derive(Debug, Default, Clone)]
+pub struct NegotiatedQos {
+    pub baud: Option<u32>,
+    pub max_turn_ms: Option<u32>,
+    pub data_size: Option<u32>,
+    pub window: Option<u32>,
+    pub add_bofs: Option<u32>,
+    pub min_turn_us: Option<u32>,
+    pub link_disc_s: Option<u32>,
+}
+
+/// A very weak PRNG seeded from the clock — enough for choosing session-local
+/// IrDA addresses without pulling in a dependency.
+fn weak_rand() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut x = (n as u64) ^ 0x9e37_79b9_7f4a_7c15;
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    x as u32
+}
+
+/// Pick a random connection address: even (bit 0 clear), not 0x00 or 0xfe
+/// (`irlap.c:933-938`).
+fn random_caddr() -> u8 {
+    loop {
+        let c = (weak_rand() as u8) & 0xfe;
+        if c != 0x00 && c != 0xfe {
+            return c;
+        }
+    }
+}
+
+/// Build an SNRM connect command: fixed 11-byte header + QoS parameters.
+pub fn build_snrm(saddr: u32, daddr: u32, ncaddr: u8) -> Vec<u8> {
+    let mut f = Vec::with_capacity(11 + SNRM_QOS_PARAMS.len() * 3);
+    f.push(CBROADCAST | CMD_FRAME); // caddr = 0xff
+    f.push(SNRM_CMD | PF_BIT); // control = 0x93
+    f.extend_from_slice(&saddr.to_le_bytes());
+    f.extend_from_slice(&daddr.to_le_bytes());
+    f.push(ncaddr); // new connection address
+    for (pi, pv) in SNRM_QOS_PARAMS {
+        f.push(pi);
+        f.push(0x01); // PL = 1
+        f.push(pv);
+    }
+    f
+}
+
+/// Build an RR (Receive Ready) supervisory frame (`irlap_frame.c`
+/// `irlap_send_rr_frame`): `control = RR | PF | (vr << 5)`.
+pub fn build_rr(caddr: u8, vr: u8, command: bool) -> Vec<u8> {
+    let addr = if command { caddr | CMD_FRAME } else { caddr };
+    vec![addr, RR | PF_BIT | (vr << 5)]
+}
+
+/// Build a DISC command frame.
+pub fn build_disc(caddr: u8) -> Vec<u8> {
+    vec![caddr | CMD_FRAME, DISC_CMD | PF_BIT]
+}
+
+fn decode_pv(pv: u8, table: &[u32]) -> Option<u32> {
+    // The UA usually returns a single chosen bit; take the lowest set bit.
+    if pv == 0 {
+        return None;
+    }
+    let idx = pv.trailing_zeros() as usize;
+    table.get(idx).copied()
+}
+
+/// Parse a UA response body: verify it, extract addresses, and decode the
+/// negotiated QoS parameters. `conn` is the connection address we proposed.
+pub fn parse_ua(body: &[u8]) -> Option<(u32, u32, NegotiatedQos)> {
+    if body.len() < 10 {
+        return None;
+    }
+    if body[1] & !PF_BIT != UA_RSP {
+        return None;
+    }
+    let saddr = u32::from_le_bytes([body[2], body[3], body[4], body[5]]);
+    let daddr = u32::from_le_bytes([body[6], body[7], body[8], body[9]]);
+
+    let mut qos = NegotiatedQos::default();
+    let mut i = 10;
+    while i + 2 <= body.len() {
+        let pi = body[i];
+        let pl = body[i + 1] as usize;
+        if i + 2 + pl > body.len() || pl == 0 {
+            break;
+        }
+        let pv = body[i + 2]; // all our params are 1-byte
+        match pi {
+            PI_BAUD_RATE => qos.baud = decode_pv(pv, &BAUD_RATES),
+            PI_MAX_TURN_TIME => qos.max_turn_ms = decode_pv(pv, &MAX_TURN_TIMES),
+            PI_DATA_SIZE => qos.data_size = decode_pv(pv, &DATA_SIZES),
+            PI_WINDOW_SIZE => qos.window = decode_pv(pv, &[1, 2, 3, 4, 5, 6, 7]),
+            PI_ADD_BOFS => qos.add_bofs = decode_pv(pv, &ADD_BOFS),
+            PI_MIN_TURN_TIME => qos.min_turn_us = decode_pv(pv, &MIN_TURN_TIMES),
+            PI_LINK_DISC => qos.link_disc_s = decode_pv(pv, &LINK_DISC_TIMES),
+            _ => {}
+        }
+        i += 2 + pl;
+    }
+    Some((saddr, daddr, qos))
+}
+
+/// Send `frame`, drain the TX FIFO, then listen up to `window` for a de-wrapped
+/// response whose connection address matches `conn` (either direction bit).
+/// Returns the first matching frame body.
+fn exchange(
+    stir: &Stir,
+    unwrapper: &mut Unwrapper,
+    frame: &[u8],
+    conn_match: impl Fn(&[u8]) -> bool,
+    window: Duration,
+) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+    stir.send_sir(frame)?;
+    let _ = stir.fifo_drain(Duration::from_millis(60));
+
+    let mut buf = vec![0u8; 4096];
+    let deadline = Instant::now() + window;
+    while Instant::now() < deadline {
+        match stir.read_bulk_in(&mut buf, Duration::from_millis(20)) {
+            Ok(n) if n > 0 => {
+                crate::logging::dump_frame("RX", &buf[..n]);
+                for body in unwrapper.push_all(&buf[..n]) {
+                    if conn_match(&body) {
+                        return Ok(Some(body));
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(rusb::Error::Timeout) => {}
+            Err(e) => crate::error!("bulk IN read error: {e}"),
+        }
+    }
+    Ok(None)
+}
+
+/// M6 entry point: discover the device, establish an IrLAP connection
+/// (SNRM/UA), and hold it with RR keepalives for `hold_secs`.
+pub fn run_connect(
+    vid: u16,
+    pid: u16,
+    speed: u32,
+    hold_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (handle, iface) = crate::usb::open_claimed(vid, pid)?;
+    println!("Claimed interface {iface}. IrLAP connect at {speed} baud...");
+
+    let _ = handle.clear_halt(crate::chip::EP_BULK_OUT);
+    let _ = handle.clear_halt(crate::chip::EP_BULK_IN);
+
+    let stir = Stir::new(&handle);
+    stir.change_speed(speed)?;
+
+    // Use one session-local source address for both discovery and connect.
+    let saddr = weak_rand() | 0x0000_0001; // nonzero
+    let me = SelfInfo {
+        saddr,
+        ..SelfInfo::default()
+    };
+
+    // 1. Discover the device to obtain its (per-session) address.
+    println!("Discovering device...");
+    let mut device = None;
+    for _ in 0..4 {
+        let found = discover(&stir, &me, 1, Duration::from_millis(200))?;
+        if let Some(d) = found.into_iter().next() {
+            device = Some(d);
+            break;
+        }
+    }
+    let device = device.ok_or("no device responded to discovery")?;
+    println!(
+        "Found \"{}\" at address 0x{:08x}",
+        device.name, device.address
+    );
+
+    // 2. SNRM/UA handshake (retry a few times).
+    let conn = random_caddr();
+    let snrm = build_snrm(saddr, device.address, conn);
+    println!("Sending SNRM (conn addr 0x{conn:02x}), awaiting UA...");
+
+    let mut unwrapper = Unwrapper::new();
+    let ua_match = |b: &[u8]| b.len() >= 2 && (b[0] & 0xfe) == conn && (b[1] & !PF_BIT) == UA_RSP;
+
+    let mut established = None;
+    for attempt in 1..=6 {
+        if let Some(body) = exchange(
+            &stir,
+            &mut unwrapper,
+            &snrm,
+            ua_match,
+            Duration::from_millis(500),
+        )? {
+            established = parse_ua(&body);
+            if established.is_some() {
+                break;
+            }
+        }
+        crate::debug!("no UA yet (attempt {attempt})");
+    }
+
+    let (_sa, _da, qos) = established.ok_or("no UA received — connection failed")?;
+    println!("\nM6: connection ESTABLISHED. Negotiated QoS:");
+    println!(
+        "  baud={:?} max_turn={:?}ms data_size={:?} window={:?} add_bofs={:?} min_turn={:?}us link_disc={:?}s",
+        qos.baud, qos.max_turn_ms, qos.data_size, qos.window, qos.add_bofs, qos.min_turn_us, qos.link_disc_s
+    );
+
+    // 3. Hold the link with RR keepalives; we are the primary and poll.
+    println!("\nHolding link for {hold_secs}s with RR keepalives...");
+    let rr = build_rr(conn, 0, true);
+    let resp_match = |b: &[u8]| !b.is_empty() && (b[0] & 0xfe) == conn;
+
+    let start = Instant::now();
+    let mut polls = 0u64;
+    let mut replies = 0u64;
+    let mut consecutive_misses = 0u64;
+    let mut max_misses = 0u64;
+
+    while start.elapsed() < Duration::from_secs(hold_secs) {
+        polls += 1;
+        match exchange(&stir, &mut unwrapper, &rr, resp_match, Duration::from_millis(400))? {
+            Some(_) => {
+                replies += 1;
+                consecutive_misses = 0;
+            }
+            None => {
+                consecutive_misses += 1;
+                max_misses = max_misses.max(consecutive_misses);
+            }
+        }
+        if polls % 10 == 0 {
+            println!("  {}s: {replies}/{polls} polls answered", start.elapsed().as_secs());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // 4. Clean disconnect (best-effort).
+    let _ = stir.send_sir(&build_disc(conn));
+    let _ = stir.fifo_drain(Duration::from_millis(60));
+
+    println!(
+        "\nHeld {hold_secs}s: {replies}/{polls} RR polls answered, longest gap {max_misses} poll(s)."
+    );
+    if replies == 0 {
+        Err("link came up (UA) but the device never answered a keepalive".into())
+    } else {
+        println!(
+            "M6 OK: IrLAP link established and maintained. If the answer rate is high and the \
+             longest gap small, the link is stable enough for M7."
+        );
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +568,40 @@ mod tests {
         assert_eq!(f[11], 0x00); // flags for S=1
         assert_eq!(f[12], 0x00); // slot 0
         assert_eq!(f[13], 0x00); // version
+    }
+
+    #[test]
+    fn snrm_frame_layout() {
+        let f = build_snrm(0x11223344, 0xbe68a303, 0x10);
+        assert_eq!(f[0], 0xff); // caddr broadcast|cmd
+        assert_eq!(f[1], 0x93); // SNRM_CMD | PF_BIT
+        assert_eq!(&f[2..6], &0x11223344u32.to_le_bytes()); // saddr
+        assert_eq!(&f[6..10], &0xbe68a303u32.to_le_bytes()); // daddr
+        assert_eq!(f[10], 0x10); // ncaddr
+        // First QoS param: baud rate PI=0x01, PL=1, PV=0x02 (9600).
+        assert_eq!(&f[11..14], &[0x01, 0x01, 0x02]);
+    }
+
+    #[test]
+    fn rr_and_disc_frames() {
+        assert_eq!(build_rr(0x10, 0, true), vec![0x11, 0x11]); // caddr|CMD, RR|PF
+        assert_eq!(build_rr(0x10, 3, false), vec![0x10, 0x71]); // vr=3 -> 3<<5|RR|PF
+        assert_eq!(build_disc(0x10), vec![0x11, 0x53]); // caddr|CMD, DISC|PF
+    }
+
+    #[test]
+    fn parse_ua_decodes_qos() {
+        let mut u = vec![0x10, UA_RSP | PF_BIT]; // caddr, control 0x73
+        u.extend_from_slice(&0xbe68a303u32.to_le_bytes()); // saddr (device)
+        u.extend_from_slice(&0x11223344u32.to_le_bytes()); // daddr (us)
+        u.extend_from_slice(&[PI_BAUD_RATE, 0x01, 0x02]); // 9600
+        u.extend_from_slice(&[PI_MAX_TURN_TIME, 0x01, 0x01]); // 500 ms
+        u.extend_from_slice(&[PI_WINDOW_SIZE, 0x01, 0x01]); // window 1
+        let (saddr, _daddr, qos) = parse_ua(&u).expect("should parse");
+        assert_eq!(saddr, 0xbe68a303);
+        assert_eq!(qos.baud, Some(9600));
+        assert_eq!(qos.max_turn_ms, Some(500));
+        assert_eq!(qos.window, Some(1));
     }
 
     #[test]

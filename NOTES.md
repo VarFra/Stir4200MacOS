@@ -87,6 +87,27 @@ risponde alla discovery IrLAP (XID), non trasmette spontaneamente. La ricezione 
 dispositivo si potrà verificare solo da M5 in poi (dopo aver inviato noi la discovery).
 Implica che M5 deve fare **TX (XID) → turnaround → RX (risposta)** in half-duplex.
 
+## M5 — Discovery IrLAP (verificato su hardware) 🎉
+
+`stir4200 discover -v`, S=1, il Galileo **risponde**:
+
+```
+M5 OK: 1 device(s) discovered:
+  address=0xbe68a303  hints=8000  charset=0x00  name="UWATEC Galileo"
+```
+
+- **name = "UWATEC Galileo"**: combacia col filtro `dc_filter_uwatec` di libdivecomputer
+  (`descriptor.c:664`). Conferma che il parsing XID e il nickname sono corretti.
+- **address = 0xbe68a303**: da usare come `daddr` nella connessione (M6). **Attenzione**:
+  gli indirizzi IrDA sono tipicamente casuali per accensione/generazione → M6 deve fare
+  discovery e usare l'indirizzo corrente, **non** cablarlo.
+- **hints = [0x80, 0x00]**: solo il bit EXTENSION, nessun hint di servizio. Irrilevante per
+  noi (ci connettiamo a LSAP 1 diretto, senza IAS).
+- La discovery ha funzionato con **S=1 slot** e i turnaround di default → il timing di base
+  in userspace regge per la discovery. Il vero test di timing resta M6 (connessione).
+- Confermato: l'header del chip in RX è assente (frame IrDA "nudi"), FCS validato dal
+  de-wrapper (0 CRC error sulle risposte valide).
+
 ## Aperti da chiarire (dall'analisi, vedi ANALYSIS.md §"Rischi/aperti")
 
 - [x] Numeri di endpoint bulk reali (OUT `0x01`/IN `0x82`) e `bNumEndpoints` (2) — M1.

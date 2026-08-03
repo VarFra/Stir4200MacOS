@@ -12,8 +12,9 @@ USB via **libusb** — senza kext, senza DriverKit, nativo arm64.
 - **M2 — Init e registri**: ✅ verificato su hardware (baudrate 9600, registri OK).
 - **M3 — Trasmissione grezza**: ✅ verificato su hardware (frame corretto sul filo, LED IR emette).
 - **M4 — Ricezione grezza**: ✅ verificato su hardware (byte ricevuti, nessun crash).
-- **M5 — Discovery IrLAP**: codice scritto (`stir4200 discover`), **in attesa di verifica**.
-- **M6 — Connessione IrLAP/IrLMP/TinyTP**: prossimo passo.
+- **M5 — Discovery IrLAP**: ✅ verificato su hardware (il Galileo risponde: "UWATEC Galileo").
+- **M6 — Connessione IrLAP (SNRM/UA + keepalive)**: codice scritto (`stir4200 connect`), **in attesa di verifica**.
+- **M7 — Protocollo Uwatec Smart (via IrLMP+TinyTP)**: prossimo passo.
 
 Conclusione chiave dell'analisi: `irda.c` di libdivecomputer delega tutto lo stack IrDA
 al sistema operativo (`AF_IRDA`/`SOCK_STREAM` = TinyTP). Su macOS quello stack non esiste,
@@ -32,6 +33,7 @@ cargo test                     # unit test SIR/CRC, non richiedono hardware
 ./target/release/stir4200 tx -v    # M3: trasmette frame SIR di test (LED IR visibile con fotocamera)
 ./target/release/stir4200 rx -v        # M4: ascolta sul bulk IN e de-wrappa lo stream SIR
 ./target/release/stir4200 discover -v  # M5: discovery IrLAP (XID) del computer subacqueo
+./target/release/stir4200 connect -v   # M6: connessione IrLAP (SNRM/UA) + keepalive 30s
 ```
 
 Su macOS, se il dispositivo non viene trovato, controllare che sia collegato con

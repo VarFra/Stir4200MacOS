@@ -29,13 +29,16 @@ COMMANDS:
                          received bytes and frames.
     discover             M5: send IrLAP XID discovery and report responding
                          devices (address + nickname).
+    connect              M6: establish an IrLAP connection (SNRM/UA) and hold it
+                         with RR keepalives.
 
 OPTIONS:
     -v, --verbose        increase verbosity (repeatable: -v, -vv, -vvv)
     -d, --device VID:PID override the USB id (default 066f:4200, hex)
     -s, --speed BAUD     baud rate for `init`/`tx`/`rx`/`discover` (default 9600)
     -c, --count N        number of frames for `tx` (default 100)
-    -t, --seconds N      listen duration for `rx` (default 20)
+    -t, --seconds N      listen duration for `rx`, or hold time for `connect`
+                         (default 20 for `rx`, 30 for `connect`)
         --slots N        discovery slots: 1/6/8/16 (default 1)
         --retries N      discovery attempts (default 3)
     -h, --help           show this help
@@ -48,6 +51,7 @@ enum Command {
     Tx,
     Rx,
     Discover,
+    Connect,
 }
 
 struct Args {
@@ -56,7 +60,7 @@ struct Args {
     pid: u16,
     speed: u32,
     count: u32,
-    seconds: u64,
+    seconds: Option<u64>,
     slots: u8,
     retries: u32,
     command: Command,
@@ -68,7 +72,7 @@ fn parse_args() -> Result<Args, String> {
     let mut pid = usb::STIR_PID;
     let mut speed: u32 = 9600;
     let mut count: u32 = 100;
-    let mut seconds: u64 = 20;
+    let mut seconds: Option<u64> = None;
     let mut slots: u8 = 1;
     let mut retries: u32 = 3;
     let mut command = Command::Enumerate;
@@ -108,7 +112,7 @@ fn parse_args() -> Result<Args, String> {
                 let t = it
                     .next()
                     .ok_or_else(|| "--seconds requires a number".to_string())?;
-                seconds = t.parse().map_err(|_| format!("bad seconds '{t}'"))?;
+                seconds = Some(t.parse().map_err(|_| format!("bad seconds '{t}'"))?);
             }
             "--slots" => {
                 let s = it
@@ -127,6 +131,7 @@ fn parse_args() -> Result<Args, String> {
             "tx" => command = Command::Tx,
             "rx" => command = Command::Rx,
             "discover" => command = Command::Discover,
+            "connect" => command = Command::Connect,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -175,9 +180,12 @@ fn main() {
         Command::Enumerate => usb::run_enumeration(args.vid, args.pid),
         Command::Init => chip::run_init(args.vid, args.pid, args.speed),
         Command::Tx => chip::run_tx(args.vid, args.pid, args.speed, args.count),
-        Command::Rx => chip::run_rx(args.vid, args.pid, args.speed, args.seconds),
+        Command::Rx => chip::run_rx(args.vid, args.pid, args.speed, args.seconds.unwrap_or(20)),
         Command::Discover => {
             irlap::run_discovery(args.vid, args.pid, args.speed, args.slots, args.retries)
+        }
+        Command::Connect => {
+            irlap::run_connect(args.vid, args.pid, args.speed, args.seconds.unwrap_or(30))
         }
     };
     if let Err(e) = result {
