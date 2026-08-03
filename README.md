@@ -14,8 +14,8 @@ USB via **libusb** — senza kext, senza DriverKit, nativo arm64.
 - **M4 — Ricezione grezza**: ✅ verificato su hardware (byte ricevuti, nessun crash).
 - **M5 — Discovery IrLAP**: ✅ verificato su hardware (il Galileo risponde: "UWATEC Galileo").
 - **M6 — Connessione IrLAP (SNRM/UA + keepalive)**: ✅ verificato (382/382 poll, gap 0 — timing risolto).
-- **M7 — Protocollo Uwatec Smart (IrLMP+TinyTP)**: codice scritto (`stir4200 download`), **in attesa di verifica**.
-- **M8 — Parsing ed esportazione per Subsurface**: prossimo passo.
+- **M7 — Protocollo Uwatec Smart (IrLMP+TinyTP)**: ✅ verificato (scaricati 287612 byte su file).
+- **M8 — Parsing ed esportazione per Subsurface**: in corso.
 
 Conclusione chiave dell'analisi: `irda.c` di libdivecomputer delega tutto lo stack IrDA
 al sistema operativo (`AF_IRDA`/`SOCK_STREAM` = TinyTP). Su macOS quello stack non esiste,

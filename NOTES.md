@@ -156,6 +156,18 @@ credito del device sempre ~127 senza consumare il nostro send-credit. Con dati a
 il download di 281 KB sono ~4700 PDU: a 9600 ci vorranno ~2 minuti (candidato a M8+ per
 negoziare una velocità più alta).
 
+## M7 — Protocollo Uwatec Smart (verificato su hardware) 🎉🎉🎉
+
+`stir4200 download -o dump.bin`: **287612 byte scaricati e salvati con successo**.
+Stack completo funzionante end-to-end: USB → SIR → IrLAP → IrLMP → TinyTP → Uwatec Smart.
+
+Il fix del flow-control a crediti era corretto: i frame *give-credit* non consumano il
+nostro send-credit, quindi si può tenere il device sempre rifornito per tutto il download
+lungo. Con la riga di progresso live si vede l'avanzamento senza `-v`.
+
+Il dump grezzo contiene le immersioni delimitate dal marker `A5 A5 5A 5A` + 4 byte LE di
+lunghezza (`uwatec_smart.c:716-738`). Prossimo: M8 (parsing ed export per Subsurface).
+
 ## Aperti da chiarire (dall'analisi, vedi ANALYSIS.md §"Rischi/aperti")
 
 - [x] Numeri di endpoint bulk reali (OUT `0x01`/IN `0x82`) e `bNumEndpoints` (2) — M1.
