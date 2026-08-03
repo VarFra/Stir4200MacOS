@@ -114,6 +114,7 @@ struct Dive {
     temp_min: f64,
     salinity_gl: u32,   // water salinity in g/l (1000 fresh, 1025 salt)
     gasmixes: Vec<(f64, f64)>, // (o2 fraction, he fraction)
+    gas_changes: Vec<(u32, usize, f64, f64)>, // (time_s, cylinder, o2, he)
     samples: Vec<Sample>,
 }
 
@@ -237,6 +238,11 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
     let mut have_temperature = false;
     let mut have_pressure = false;
 
+    // Active gas mix tracking (mix id), for emitting gas-change events.
+    let mut active_gasmix: u32 = 0;
+    let mut prev_gasmix: i64 = -1;
+    let mut gas_changes: Vec<(u32, usize, f64, f64)> = Vec::new(); // (time, cyl, o2, he)
+
     let mut samples = Vec::new();
     let mut offset = header.size;
     let n = rec.len();
@@ -304,14 +310,32 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
             }
             Pressure => {
                 if info.1 {
+                    // Absolute pressure carries the active tank/gas: for trimix
+                    // it is packed in the top nibble, otherwise it is the
+                    // sample's table index (`uwatec_smart_parser.c:1014`).
+                    let tank = if trimix {
+                        (value & 0xF000) >> 12
+                    } else {
+                        info.2
+                    };
                     if trimix {
                         pressure = (value & 0x0FFF) as i64;
                     } else {
                         pressure = value as i64;
                     }
                     have_pressure = true;
+                    active_gasmix = tank;
                 } else {
                     pressure += svalue as i64;
+                }
+            }
+            Alarms => {
+                // Only the EV_GASMIX field interests us (`galileo_events_1`,
+                // `trimix_events_2`).
+                match info.2 {
+                    1 => active_gasmix = (value & 0x60) >> 5,
+                    2 if trimix => active_gasmix = (value & 0xF0) >> 4,
+                    _ => {}
                 }
             }
             Time => complete = value,
@@ -340,6 +364,14 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
         }
 
         while complete > 0 {
+            // Emit a gas-change event when the active mix changes.
+            if !mixes.is_empty() && active_gasmix as i64 != prev_gasmix {
+                if let Some(ci) = mixes.iter().position(|m| m.0 == active_gasmix) {
+                    gas_changes.push((time, ci, mixes[ci].1, mixes[ci].2));
+                }
+                prev_gasmix = active_gasmix as i64;
+            }
+
             let depth_m =
                 (depth - depth_calibration) as f64 * (2.0 * BAR / 1000.0) / (density * 10.0);
             samples.push(Sample {
@@ -361,6 +393,21 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
         }
     }
 
+    // Re-map gas-change cylinder indices to the sorted cylinder order.
+    let order: Vec<u32> = {
+        let mut ids: Vec<u32> = mixes.iter().map(|m| m.0).collect();
+        ids.sort_unstable();
+        ids
+    };
+    let remap = |old_ci: usize| -> usize {
+        let mixid = mixes[old_ci].0;
+        order.iter().position(|&x| x == mixid).unwrap_or(old_ci)
+    };
+    let gas_changes = gas_changes
+        .into_iter()
+        .map(|(t, ci, o2, he)| (t, remap(ci), o2, he))
+        .collect();
+
     mixes.sort_by_key(|m| m.0);
     let gasmixes = mixes.iter().map(|m| (m.1, m.2)).collect();
 
@@ -371,6 +418,7 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
         temp_min,
         salinity_gl: if salt { 1025 } else { 1000 },
         gasmixes,
+        gas_changes,
         samples,
     })
 }
@@ -435,6 +483,21 @@ fn write_xml(dives: &[Dive], model_name: &str) -> String {
             dive.maxdepth,
             dive.temp_min
         );
+
+        for (t, cyl, o2, he) in &dive.gas_changes {
+            let _ = write!(
+                out,
+                "    <event time='{}:{:02} min' type='25' name='gaschange' cylinder='{}' o2='{:.1}%'",
+                t / 60,
+                t % 60,
+                cyl,
+                o2 * 100.0
+            );
+            if *he > 0.0 {
+                let _ = write!(out, " he='{:.1}%'", he * 100.0);
+            }
+            out.push_str(" />\n");
+        }
 
         for s in &dive.samples {
             let _ = write!(
