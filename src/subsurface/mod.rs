@@ -112,6 +112,7 @@ struct Dive {
     divetime_s: u32,
     maxdepth: f64,
     temp_min: f64,
+    salinity_gl: u32,   // water salinity in g/l (1000 fresh, 1025 salt)
     gasmixes: Vec<(f64, f64)>, // (o2 fraction, he fraction)
     samples: Vec<Sample>,
 }
@@ -349,6 +350,7 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
         divetime_s,
         maxdepth,
         temp_min,
+        salinity_gl: if salt { 1025 } else { 1000 },
         gasmixes,
         samples,
     })
@@ -408,8 +410,9 @@ fn write_xml(dives: &[Dive], model_name: &str) -> String {
 
         let _ = write!(
             out,
-            "  <divecomputer model='{}'>\n    <depth max='{:.2} m' />\n    <temperature water='{:.1} C' />\n",
+            "  <divecomputer model='{}' salinity='{} g/l'>\n    <depth max='{:.2} m' />\n    <temperature water='{:.1} C' />\n",
             xml_escape(model_name),
+            dive.salinity_gl,
             dive.maxdepth,
             dive.temp_min
         );
@@ -469,12 +472,13 @@ pub fn run_parse(
             Ok(dive) => {
                 let (y, mo, d, hh, mm, _ss) = civil(dive.unix_time);
                 println!(
-                    "  dive {:>3}: {:04}-{:02}-{:02} {:02}:{:02}  {:>3} min  max {:>5.1} m  min {:>4.1} C  {} samples",
+                    "  dive {:>3}: {:04}-{:02}-{:02} {:02}:{:02}  {:>3} min  max {:>5.1} m  min {:>4.1} C  {}  {} samples",
                     i + 1,
                     y, mo, d, hh, mm,
                     dive.divetime_s / 60,
                     dive.maxdepth,
                     dive.temp_min,
+                    if dive.salinity_gl >= 1025 { "salt " } else { "fresh" },
                     dive.samples.len()
                 );
                 dives.push(dive);
