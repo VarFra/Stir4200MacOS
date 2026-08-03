@@ -45,6 +45,25 @@ da 64 byte, transfer di controllo sull'endpoint 0 per i registri.
 **Conclusione M2**: meccanismo di I/O sui registri pienamente funzionante, baudrate
 impostato, FIFO leggibile. `REVID = 3` per questo esemplare (bcdDevice 0.0.8).
 
+## M3 — Trasmissione grezza (verificato su hardware)
+
+`stir4200 tx -v` a 9600 SIR, 100 frame: **nessun errore USB** e **sfarfallio IR
+visibile** con la fotocamera dello smartphone. Il frame sul filo (payload di test
+`00 c0 c1 7d ff 55 aa`) è esattamente quello atteso (28 byte totali):
+
+```
+55 aa 18 00                          header chip (0x55 0xAA, len=0x0018=24)
+ff ff ff ff ff ff ff ff ff ff        10 XBOF
+c0                                   BOF
+00  7d e0  7d e1  7d 5d  ff  55  aa  payload con escaping (C0/C1/7D → CE + b^0x20)
+16 7b                                FCS (LSB-first)
+c1                                   EOF
+```
+
+→ Header del chip, conteggio XBOF, byte-stuffing, campo lunghezza e FCS **tutti
+corretti in trasmissione**. L'header `0x55 0xAA len len` è quindi richiesto/accettato
+anche in SIR (resta da vedere la RX a M4).
+
 ## Aperti da chiarire (dall'analisi, vedi ANALYSIS.md §"Rischi/aperti")
 
 - [x] Numeri di endpoint bulk reali (OUT `0x01`/IN `0x82`) e `bNumEndpoints` (2) — M1.

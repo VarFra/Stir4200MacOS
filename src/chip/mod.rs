@@ -6,7 +6,7 @@
 //! Registers are written **one at a time**: the driver notes that multi-register
 //! writes "don't appear to work" (`stir4200.c:497`).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusb::{request_type, Context, DeviceHandle, Direction, Recipient, RequestType};
 
@@ -162,6 +162,13 @@ impl<'a> Stir<'a> {
         crate::logging::dump_frame("TX", &buf);
         self.handle.write_bulk(EP_BULK_OUT, &buf, TRANSMIT_TIMEOUT)
     }
+
+    /// Read raw (still-wrapped) bytes from the bulk IN endpoint. Returns the
+    /// number of bytes read; a USB timeout with no data surfaces as
+    /// `Err(rusb::Error::Timeout)` and should be treated as "nothing yet".
+    pub fn read_bulk_in(&self, buf: &mut [u8], timeout: Duration) -> rusb::Result<usize> {
+        self.handle.read_bulk(EP_BULK_IN, buf, timeout)
+    }
 }
 
 /// M2 entry point: reset the chip, set the baud rate, and verify by reading
@@ -300,4 +307,70 @@ pub fn run_tx(
     } else {
         Err(format!("M3: {errors}/{count} frames failed to transmit").into())
     }
+}
+
+/// M4 entry point: poll the bulk IN endpoint, de-wrap the SIR stream, and
+/// report received bytes and frames. Acceptance: bytes arrive when an IR source
+/// (a TV remote, or the powered-on dive computer) is aimed at the dongle, and
+/// malformed frames are dropped without crashing.
+pub fn run_rx(
+    vid: u16,
+    pid: u16,
+    speed: u32,
+    seconds: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (handle, iface) = crate::usb::open_claimed(vid, pid)?;
+    println!("Claimed interface {iface}. Setting up SIR at {speed} baud for RX...");
+
+    let _ = handle.clear_halt(EP_BULK_OUT);
+    let _ = handle.clear_halt(EP_BULK_IN);
+
+    let stir = Stir::new(&handle);
+    stir.change_speed(speed)?;
+
+    println!(
+        "Listening on bulk IN for {seconds}s. Aim an IR source at the dongle: a TV remote \
+         (produces noise bytes) or the dive computer switched to PC/download mode.\n"
+    );
+
+    let mut unwrapper = crate::sir::framing::Unwrapper::new();
+    let mut buf = vec![0u8; 4096];
+    let mut total_bytes: u64 = 0;
+    let mut total_frames: u64 = 0;
+
+    let read_timeout = Duration::from_millis(200);
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+
+    while Instant::now() < deadline {
+        match stir.read_bulk_in(&mut buf, read_timeout) {
+            Ok(0) => {}
+            Ok(n) => {
+                total_bytes += n as u64;
+                crate::logging::dump_frame("RX", &buf[..n]);
+                for frame in unwrapper.push_all(&buf[..n]) {
+                    total_frames += 1;
+                    println!("  frame OK ({} bytes): {:02x?}", frame.len(), frame);
+                }
+            }
+            Err(rusb::Error::Timeout) => {} // no data this interval
+            Err(e) => crate::error!("bulk IN read error: {e}"),
+        }
+    }
+
+    println!();
+    println!(
+        "M4: received {total_bytes} raw byte(s), {total_frames} valid frame(s), \
+         {} CRC error(s), {} short frame(s).",
+        unwrapper.crc_errors, unwrapper.short_frames
+    );
+    if total_bytes == 0 {
+        println!(
+            "  No bytes arrived. Try a TV remote up close, or ensure the dive computer is in \
+             its PC-communication mode and its IR window faces the dongle."
+        );
+    } else {
+        println!("  RX path works: bytes arrived and malformed frames were dropped without crashing.");
+    }
+
+    Ok(())
 }
