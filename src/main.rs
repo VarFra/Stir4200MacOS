@@ -8,6 +8,7 @@ pub mod logging;
 pub mod chip;
 pub mod irlap;
 pub mod sir;
+pub mod smart;
 pub mod usb;
 
 use logging::Level;
@@ -31,6 +32,8 @@ COMMANDS:
                          devices (address + nickname).
     connect              M6: establish an IrLAP connection (SNRM/UA) and hold it
                          with RR keepalives.
+    download             M7: connect, run the Uwatec Smart protocol, and save the
+                         raw dive memory to a file (--out).
 
 OPTIONS:
     -v, --verbose        increase verbosity (repeatable: -v, -vv, -vvv)
@@ -41,6 +44,7 @@ OPTIONS:
                          (default 20 for `rx`, 30 for `connect`)
         --slots N        discovery slots: 1/6/8/16 (default 1)
         --retries N      discovery attempts (default 3)
+    -o, --out FILE       output file for `download` (default dump.bin)
     -h, --help           show this help
 ";
 
@@ -52,6 +56,7 @@ enum Command {
     Rx,
     Discover,
     Connect,
+    Download,
 }
 
 struct Args {
@@ -63,6 +68,7 @@ struct Args {
     seconds: Option<u64>,
     slots: u8,
     retries: u32,
+    out: String,
     command: Command,
 }
 
@@ -75,6 +81,7 @@ fn parse_args() -> Result<Args, String> {
     let mut seconds: Option<u64> = None;
     let mut slots: u8 = 1;
     let mut retries: u32 = 3;
+    let mut out = String::from("dump.bin");
     let mut command = Command::Enumerate;
     let mut verbosity: u8 = 0;
 
@@ -126,12 +133,18 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or_else(|| "--retries requires a number".to_string())?;
                 retries = r.parse().map_err(|_| format!("bad retries '{r}'"))?;
             }
+            "-o" | "--out" => {
+                out = it
+                    .next()
+                    .ok_or_else(|| "--out requires a file path".to_string())?;
+            }
             "enumerate" => command = Command::Enumerate,
             "init" => command = Command::Init,
             "tx" => command = Command::Tx,
             "rx" => command = Command::Rx,
             "discover" => command = Command::Discover,
             "connect" => command = Command::Connect,
+            "download" => command = Command::Download,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -151,6 +164,7 @@ fn parse_args() -> Result<Args, String> {
         seconds,
         slots,
         retries,
+        out,
         command,
     })
 }
@@ -187,6 +201,7 @@ fn main() {
         Command::Connect => {
             irlap::run_connect(args.vid, args.pid, args.speed, args.seconds.unwrap_or(30))
         }
+        Command::Download => smart::run_download(args.vid, args.pid, args.speed, &args.out),
     };
     if let Err(e) = result {
         error!("{e}");

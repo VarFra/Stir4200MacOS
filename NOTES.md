@@ -108,6 +108,30 @@ M5 OK: 1 device(s) discovered:
 - Confermato: l'header del chip in RX è assente (frame IrDA "nudi"), FCS validato dal
   de-wrapper (0 CRC error sulle risposte valide).
 
+## M6 — Connessione IrLAP (verificato su hardware) 🎉🎉 — FATTIBILITÀ CONFERMATA
+
+`stir4200 connect -v`: la connessione si stabilisce (SNRM→UA) e il link regge:
+
+```
+M6: connection ESTABLISHED. Negotiated QoS: ...
+Held 30s: 382/382 RR polls answered, longest gap 0 poll(s).
+```
+
+**382/382 poll risposte, gap 0.** Questo è il dato decisivo del progetto:
+
+- Il **rischio timing di §6** (turnaround IrLAP stretti vs round-trip USB in userspace
+  non-real-time), indicato dall'analisi come il vero gate di fattibilità, **non si
+  verifica**. Il link IrLAP userspace è **rock-solid** a 9600 su macOS Apple Silicon.
+- Non è servito alcun workaround (né thread RX ad alta priorità, né parametri estremi).
+  L'approccio libusb userspace è quindi **pienamente fattibile** end-to-end.
+- La scelta di offrire 500 ms di max turnaround e 9600-only si è rivelata giusta: budget
+  di turnaround abbondante, nessun cambio velocità a metà sessione.
+- Half-duplex TX→drain→RX con `fifo_drain` funziona in modo affidabile ciclo dopo ciclo.
+
+Implicazione: si può procedere con M7 (IrLMP + TinyTP + protocollo Uwatec) con fiducia.
+Nota: M7 richiede il trasferimento dati con **I-frame** (N(s)/N(r)), non solo le RR
+supervisory di M6.
+
 ## Aperti da chiarire (dall'analisi, vedi ANALYSIS.md §"Rischi/aperti")
 
 - [x] Numeri di endpoint bulk reali (OUT `0x01`/IN `0x82`) e `bNumEndpoints` (2) — M1.
@@ -117,7 +141,7 @@ M5 OK: 1 device(s) discovered:
       con frame IrDA veri a M5).
 - [x] macOS **non** aggancia lo STIr4200: claim diretto OK, nessun kext da rilasciare (M1).
 - [ ] Vettori di test noti per l'FCS CRC-CCITT (unit test, pre-hardware).
-- [ ] Parametri IrLAP realmente negoziati dal Galileo e latenza round-trip USB misurata
-      in userspace (M5/M6) — dato che decide la fattibilità.
+- [x] Parametri IrLAP negoziati e latenza round-trip in userspace (M6): **link stabile
+      382/382 poll, gap 0** → il rischio timing di §6 è risolto, progetto fattibile.
 - [ ] Traccia di riferimento Windows x64 (USBPcap + Wireshark) di una sessione di
       download funzionante (brief §9).

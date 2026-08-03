@@ -316,6 +316,11 @@ fn weak_rand() -> u32 {
     x as u32
 }
 
+/// Public wrapper so other layers can seed a session-local source address.
+pub fn weak_rand_pub() -> u32 {
+    weak_rand()
+}
+
 /// Pick a random connection address: even (bit 0 clear), not 0x00 or 0xfe
 /// (`irlap.c:933-938`).
 fn random_caddr() -> u8 {
@@ -433,8 +438,172 @@ fn exchange(
     Ok(None)
 }
 
-/// M6 entry point: discover the device, establish an IrLAP connection
-/// (SNRM/UA), and hold it with RR keepalives for `hold_secs`.
+/// An established IrLAP connection where we act as the NRM **primary**.
+/// Tracks the send/receive sequence numbers and drives the poll/final exchange.
+/// Window size is 1 (as negotiated), so each poll yields exactly one secondary
+/// frame ending with the F bit.
+pub struct IrlapLink {
+    unwrapper: Unwrapper,
+    conn: u8,
+    vs: u8, // V(s), our send sequence number
+    vr: u8, // V(r), our receive sequence number
+    resp_window: Duration,
+    retries: u32,
+}
+
+impl IrlapLink {
+    pub fn conn(&self) -> u8 {
+        self.conn
+    }
+
+    /// One primary transaction: send a frame with the poll bit (an I-frame if
+    /// `info` is given, otherwise RR), then read the secondary's response until
+    /// its final bit or timeout. Updates V(s)/V(r). Returns
+    /// `(responded, info)` where `responded` is true if any matching frame came
+    /// back, and `info` is the secondary's I-field if it sent one.
+    pub fn transact(
+        &mut self,
+        stir: &Stir,
+        info: Option<&[u8]>,
+    ) -> Result<(bool, Option<Vec<u8>>), Box<dyn std::error::Error>> {
+        let sent_i = info.is_some();
+        let frame = match info {
+            Some(data) => {
+                // I-frame: control = N(r)<<5 | P | N(s)<<1 (bit0 = 0).
+                let control = (self.vr << 5) | PF_BIT | (self.vs << 1);
+                let mut f = Vec::with_capacity(2 + data.len());
+                f.push(self.conn | CMD_FRAME);
+                f.push(control);
+                f.extend_from_slice(data);
+                f
+            }
+            None => build_rr(self.conn, self.vr, true),
+        };
+
+        for _try in 0..self.retries {
+            stir.send_sir(&frame)?;
+            let _ = stir.fifo_drain(Duration::from_millis(60));
+
+            let mut buf = vec![0u8; 4096];
+            let deadline = Instant::now() + self.resp_window;
+            while Instant::now() < deadline {
+                let n = match stir.read_bulk_in(&mut buf, Duration::from_millis(20)) {
+                    Ok(n) if n > 0 => n,
+                    Ok(_) => continue,
+                    Err(rusb::Error::Timeout) => continue,
+                    Err(e) => {
+                        crate::error!("bulk IN read error: {e}");
+                        continue;
+                    }
+                };
+                crate::logging::dump_frame("RX", &buf[..n]);
+                for body in self.unwrapper.push_all(&buf[..n]) {
+                    if body.len() < 2 || (body[0] & 0xfe) != self.conn {
+                        continue;
+                    }
+                    let control = body[1];
+                    if control & 0x01 == 0 {
+                        // I-frame from the secondary.
+                        let ns = (control >> 1) & 0x07;
+                        let nr = (control >> 5) & 0x07;
+                        let pf = (control >> 4) & 1;
+                        if sent_i && nr == ((self.vs + 1) & 0x07) {
+                            self.vs = (self.vs + 1) & 0x07;
+                        }
+                        let mut out = None;
+                        if ns == self.vr {
+                            self.vr = (self.vr + 1) & 0x07;
+                            out = Some(body[2..].to_vec());
+                        }
+                        if pf == 1 {
+                            return Ok((true, out));
+                        }
+                    } else {
+                        // Supervisory frame (RR/RNR/REJ).
+                        let nr = (control >> 5) & 0x07;
+                        let pf = (control >> 4) & 1;
+                        if sent_i && nr == ((self.vs + 1) & 0x07) {
+                            self.vs = (self.vs + 1) & 0x07;
+                        }
+                        if pf == 1 {
+                            return Ok((true, None));
+                        }
+                    }
+                }
+            }
+            // No final-bit response within the window: retransmit (V(s) not
+            // advanced yet, so this is a legitimate NRM retransmission).
+        }
+        Ok((false, None))
+    }
+
+    /// Send a DISC command (best-effort clean disconnect).
+    pub fn disconnect(&mut self, stir: &Stir) {
+        let _ = stir.send_sir(&build_disc(self.conn));
+        let _ = stir.fifo_drain(Duration::from_millis(60));
+    }
+}
+
+/// Discover the device and bring up an IrLAP connection (SNRM/UA). Returns the
+/// established link, the discovered device, and the negotiated QoS.
+pub fn connect(
+    stir: &Stir,
+    saddr: u32,
+) -> Result<(IrlapLink, DiscoveredDevice, NegotiatedQos), Box<dyn std::error::Error>> {
+    let me = SelfInfo {
+        saddr,
+        ..SelfInfo::default()
+    };
+
+    // 1. Discover the device to obtain its (per-session) address.
+    let mut device = None;
+    for _ in 0..4 {
+        if let Some(d) = discover(stir, &me, 1, Duration::from_millis(200))?
+            .into_iter()
+            .next()
+        {
+            device = Some(d);
+            break;
+        }
+    }
+    let device = device.ok_or("no device responded to discovery")?;
+
+    // 2. SNRM/UA handshake (retried).
+    let conn = random_caddr();
+    let snrm = build_snrm(saddr, device.address, conn);
+    let ua_match = |b: &[u8]| b.len() >= 2 && (b[0] & 0xfe) == conn && (b[1] & !PF_BIT) == UA_RSP;
+
+    let mut unwrapper = Unwrapper::new();
+    let mut established = None;
+    for _ in 0..6 {
+        if let Some(body) = exchange(
+            stir,
+            &mut unwrapper,
+            &snrm,
+            ua_match,
+            Duration::from_millis(500),
+        )? {
+            established = parse_ua(&body);
+            if established.is_some() {
+                break;
+            }
+        }
+    }
+    let (_sa, _da, qos) = established.ok_or("no UA received — connection failed")?;
+
+    let link = IrlapLink {
+        unwrapper,
+        conn,
+        vs: 0,
+        vr: 0,
+        resp_window: Duration::from_millis(500),
+        retries: 4,
+    };
+    Ok((link, device, qos))
+}
+
+/// M6 entry point: discover, establish an IrLAP connection (SNRM/UA), and hold
+/// it with RR keepalives for `hold_secs`.
 pub fn run_connect(
     vid: u16,
     pid: u16,
@@ -450,66 +619,21 @@ pub fn run_connect(
     let stir = Stir::new(&handle);
     stir.change_speed(speed)?;
 
-    // Use one session-local source address for both discovery and connect.
-    let saddr = weak_rand() | 0x0000_0001; // nonzero
-    let me = SelfInfo {
-        saddr,
-        ..SelfInfo::default()
-    };
-
-    // 1. Discover the device to obtain its (per-session) address.
-    println!("Discovering device...");
-    let mut device = None;
-    for _ in 0..4 {
-        let found = discover(&stir, &me, 1, Duration::from_millis(200))?;
-        if let Some(d) = found.into_iter().next() {
-            device = Some(d);
-            break;
-        }
-    }
-    let device = device.ok_or("no device responded to discovery")?;
+    let saddr = weak_rand() | 0x0000_0001;
+    println!("Discovering and connecting...");
+    let (mut link, device, qos) = connect(&stir, saddr)?;
     println!(
-        "Found \"{}\" at address 0x{:08x}",
-        device.name, device.address
+        "Found \"{}\" at 0x{:08x}, connection ESTABLISHED (conn addr 0x{:02x}).",
+        device.name,
+        device.address,
+        link.conn()
+    );
+    println!(
+        "  Negotiated QoS: baud={:?} max_turn={:?}ms data_size={:?} window={:?} min_turn={:?}us link_disc={:?}s",
+        qos.baud, qos.max_turn_ms, qos.data_size, qos.window, qos.min_turn_us, qos.link_disc_s
     );
 
-    // 2. SNRM/UA handshake (retry a few times).
-    let conn = random_caddr();
-    let snrm = build_snrm(saddr, device.address, conn);
-    println!("Sending SNRM (conn addr 0x{conn:02x}), awaiting UA...");
-
-    let mut unwrapper = Unwrapper::new();
-    let ua_match = |b: &[u8]| b.len() >= 2 && (b[0] & 0xfe) == conn && (b[1] & !PF_BIT) == UA_RSP;
-
-    let mut established = None;
-    for attempt in 1..=6 {
-        if let Some(body) = exchange(
-            &stir,
-            &mut unwrapper,
-            &snrm,
-            ua_match,
-            Duration::from_millis(500),
-        )? {
-            established = parse_ua(&body);
-            if established.is_some() {
-                break;
-            }
-        }
-        crate::debug!("no UA yet (attempt {attempt})");
-    }
-
-    let (_sa, _da, qos) = established.ok_or("no UA received — connection failed")?;
-    println!("\nM6: connection ESTABLISHED. Negotiated QoS:");
-    println!(
-        "  baud={:?} max_turn={:?}ms data_size={:?} window={:?} add_bofs={:?} min_turn={:?}us link_disc={:?}s",
-        qos.baud, qos.max_turn_ms, qos.data_size, qos.window, qos.add_bofs, qos.min_turn_us, qos.link_disc_s
-    );
-
-    // 3. Hold the link with RR keepalives; we are the primary and poll.
     println!("\nHolding link for {hold_secs}s with RR keepalives...");
-    let rr = build_rr(conn, 0, true);
-    let resp_match = |b: &[u8]| !b.is_empty() && (b[0] & 0xfe) == conn;
-
     let start = Instant::now();
     let mut polls = 0u64;
     let mut replies = 0u64;
@@ -518,25 +642,24 @@ pub fn run_connect(
 
     while start.elapsed() < Duration::from_secs(hold_secs) {
         polls += 1;
-        match exchange(&stir, &mut unwrapper, &rr, resp_match, Duration::from_millis(400))? {
-            Some(_) => {
-                replies += 1;
-                consecutive_misses = 0;
-            }
-            None => {
-                consecutive_misses += 1;
-                max_misses = max_misses.max(consecutive_misses);
-            }
+        let (responded, _) = link.transact(&stir, None)?;
+        if responded {
+            replies += 1;
+            consecutive_misses = 0;
+        } else {
+            consecutive_misses += 1;
+            max_misses = max_misses.max(consecutive_misses);
         }
         if polls % 10 == 0 {
-            println!("  {}s: {replies}/{polls} polls answered", start.elapsed().as_secs());
+            println!(
+                "  {}s: {replies}/{polls} polls answered",
+                start.elapsed().as_secs()
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // 4. Clean disconnect (best-effort).
-    let _ = stir.send_sir(&build_disc(conn));
-    let _ = stir.fifo_drain(Duration::from_millis(60));
+    link.disconnect(&stir);
 
     println!(
         "\nHeld {hold_secs}s: {replies}/{polls} RR polls answered, longest gap {max_misses} poll(s)."
@@ -544,10 +667,7 @@ pub fn run_connect(
     if replies == 0 {
         Err("link came up (UA) but the device never answered a keepalive".into())
     } else {
-        println!(
-            "M6 OK: IrLAP link established and maintained. If the answer rate is high and the \
-             longest gap small, the link is stable enough for M7."
-        );
+        println!("M6 OK: IrLAP link established and maintained.");
         Ok(())
     }
 }

@@ -13,8 +13,9 @@ USB via **libusb** — senza kext, senza DriverKit, nativo arm64.
 - **M3 — Trasmissione grezza**: ✅ verificato su hardware (frame corretto sul filo, LED IR emette).
 - **M4 — Ricezione grezza**: ✅ verificato su hardware (byte ricevuti, nessun crash).
 - **M5 — Discovery IrLAP**: ✅ verificato su hardware (il Galileo risponde: "UWATEC Galileo").
-- **M6 — Connessione IrLAP (SNRM/UA + keepalive)**: codice scritto (`stir4200 connect`), **in attesa di verifica**.
-- **M7 — Protocollo Uwatec Smart (via IrLMP+TinyTP)**: prossimo passo.
+- **M6 — Connessione IrLAP (SNRM/UA + keepalive)**: ✅ verificato (382/382 poll, gap 0 — timing risolto).
+- **M7 — Protocollo Uwatec Smart (IrLMP+TinyTP)**: codice scritto (`stir4200 download`), **in attesa di verifica**.
+- **M8 — Parsing ed esportazione per Subsurface**: prossimo passo.
 
 Conclusione chiave dell'analisi: `irda.c` di libdivecomputer delega tutto lo stack IrDA
 al sistema operativo (`AF_IRDA`/`SOCK_STREAM` = TinyTP). Su macOS quello stack non esiste,
@@ -34,6 +35,7 @@ cargo test                     # unit test SIR/CRC, non richiedono hardware
 ./target/release/stir4200 rx -v        # M4: ascolta sul bulk IN e de-wrappa lo stream SIR
 ./target/release/stir4200 discover -v  # M5: discovery IrLAP (XID) del computer subacqueo
 ./target/release/stir4200 connect -v   # M6: connessione IrLAP (SNRM/UA) + keepalive 30s
+./target/release/stir4200 download -o dump.bin  # M7: scarica la memoria immersioni su file
 ```
 
 Su macOS, se il dispositivo non viene trovato, controllare che sia collegato con
@@ -50,7 +52,8 @@ viene stampato in evidenza per verificare l'applicabilità dei valori dei regist
 
 `src/usb/` (trasporto libusb, M1) · `src/sir/` (framing async + CRC; per ora solo il
 CRC-CCITT con unit test) · `src/logging.rs` (verbosità + hex dump) · `src/main.rs` (CLI).
-In arrivo: `irlap/` · `irlmp/` · `ttp/` (TinyTP) · `smart/` (protocollo Uwatec).
+`src/irlap/` (discovery XID, connessione SNRM/UA, I-frame/RR NRM primario) ·
+`src/smart/` (IrLMP + TinyTP con flow-control a crediti, protocollo Uwatec Smart).
 
 ## Licenza
 
