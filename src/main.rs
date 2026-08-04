@@ -51,6 +51,8 @@ OPTIONS:
                          XML for `parse` (default dives.xml)
     -i, --in FILE        input dump for `parse` (default dump.bin)
     -f, --format FMT     `parse` output format: xml (default) or uddf
+        --since DATE     `parse`: only dives on/after DATE (YYYY-MM-DD[THH:MM])
+        --last N         `parse`: only the most recent N dives
     -h, --help           show this help
 ";
 
@@ -78,6 +80,8 @@ struct Args {
     out: Option<String>,
     input: String,
     format: String,
+    since: Option<String>,
+    last: Option<usize>,
     command: Command,
 }
 
@@ -93,6 +97,8 @@ fn parse_args() -> Result<Args, String> {
     let mut out: Option<String> = None;
     let mut input = String::from("dump.bin");
     let mut format = String::from("xml");
+    let mut since: Option<String> = None;
+    let mut last: Option<usize> = None;
     let mut command = Command::Enumerate;
     let mut verbosity: u8 = 0;
 
@@ -160,6 +166,18 @@ fn parse_args() -> Result<Args, String> {
                     .next()
                     .ok_or_else(|| "--format requires xml or uddf".to_string())?;
             }
+            "--since" => {
+                since = Some(
+                    it.next()
+                        .ok_or_else(|| "--since requires a date (YYYY-MM-DD)".to_string())?,
+                );
+            }
+            "--last" => {
+                let n = it
+                    .next()
+                    .ok_or_else(|| "--last requires a number".to_string())?;
+                last = Some(n.parse().map_err(|_| format!("bad --last '{n}'"))?);
+            }
             "enumerate" => command = Command::Enumerate,
             "init" => command = Command::Init,
             "tx" => command = Command::Tx,
@@ -190,6 +208,8 @@ fn parse_args() -> Result<Args, String> {
         out,
         input,
         format,
+        since,
+        last,
         command,
     })
 }
@@ -243,6 +263,8 @@ fn main() {
                 args.out.as_deref().unwrap_or(default_out),
                 "Uwatec Galileo",
                 &args.format,
+                args.since.as_deref(),
+                args.last,
             )
         }
     };

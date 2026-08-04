@@ -108,6 +108,7 @@ struct Sample {
 }
 
 struct Dive {
+    number: usize,      // stable dive number (chronological, 1-based)
     unix_time: i64,     // device local wall-clock as a unix timestamp
     divetime_s: u32,
     maxdepth: f64,
@@ -451,6 +452,7 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
         .collect();
 
     Ok(Dive {
+        number: 0, // assigned by run_parse (chronological)
         unix_time,
         divetime_s,
         maxdepth,
@@ -485,7 +487,7 @@ fn write_xml(dives: &[Dive], model_name: &str) -> String {
     let mut out = String::new();
     out.push_str("<divelog program='stir4200' version='3'>\n<dives>\n");
 
-    for (i, dive) in dives.iter().enumerate() {
+    for dive in dives.iter() {
         let (y, mo, d, hh, mm, ss) = civil(dive.unix_time);
         let dur_m = dive.divetime_s / 60;
         let dur_s = dive.divetime_s % 60;
@@ -493,7 +495,7 @@ fn write_xml(dives: &[Dive], model_name: &str) -> String {
         let _ = write!(
             out,
             "<dive number='{}' date='{:04}-{:02}-{:02}' time='{:02}:{:02}:{:02}' duration='{}:{:02} min'>\n",
-            i + 1,
+            dive.number,
             y,
             mo,
             d,
@@ -569,6 +571,49 @@ fn write_xml(dives: &[Dive], model_name: &str) -> String {
     out
 }
 
+/// Inverse of `civil`: unix seconds from a Y/M/D H:M:S (Howard Hinnant).
+fn unix_from_civil(y: i64, m: i64, d: i64, hh: i64, mm: i64, ss: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    days * 86400 + hh * 3600 + mm * 60 + ss
+}
+
+/// Parse a `--since` date: `YYYY-MM-DD`, optionally `THH:MM[:SS]` or ` HH:MM[:SS]`.
+/// Returns the corresponding wall-clock unix timestamp.
+fn parse_since(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    let (date, time) = match s.split_once(['T', ' ']) {
+        Some((d, t)) => (d, Some(t)),
+        None => (s, None),
+    };
+    let dp: Vec<&str> = date.split('-').collect();
+    if dp.len() != 3 {
+        return Err(format!("bad date '{s}' (expected YYYY-MM-DD)"));
+    }
+    let y: i64 = dp[0].parse().map_err(|_| format!("bad year in '{s}'"))?;
+    let mo: i64 = dp[1].parse().map_err(|_| format!("bad month in '{s}'"))?;
+    let d: i64 = dp[2].parse().map_err(|_| format!("bad day in '{s}'"))?;
+    let (mut hh, mut mm, mut ss) = (0i64, 0i64, 0i64);
+    if let Some(t) = time {
+        let tp: Vec<&str> = t.split(':').collect();
+        if !tp.is_empty() {
+            hh = tp[0].parse().map_err(|_| format!("bad hour in '{s}'"))?;
+        }
+        if tp.len() > 1 {
+            mm = tp[1].parse().map_err(|_| format!("bad minute in '{s}'"))?;
+        }
+        if tp.len() > 2 {
+            ss = tp[2].parse().map_err(|_| format!("bad second in '{s}'"))?;
+        }
+    }
+    Ok(unix_from_civil(y, mo, d, hh, mm, ss))
+}
+
 /// Write a UDDF 3.2.0 document (the format Subsurface imports via its UDDF
 /// XSLT). Units are SI: metres, seconds, Kelvin, Pascal, and gas fractions.
 /// Element names/paths match Subsurface's `xslt/uddf.xslt` (namespace-less).
@@ -611,13 +656,13 @@ fn write_uddf(dives: &[Dive]) -> String {
     out.push_str("</gasdefinitions>\n");
 
     out.push_str("<profiledata>\n<repetitiongroup>\n");
-    for (di, dive) in dives.iter().enumerate() {
+    for dive in dives.iter() {
         let (y, mo, d, hh, mm, ss) = civil(dive.unix_time);
         out.push_str("<dive>\n");
         let _ = write!(
             out,
             "  <informationbeforedive><datetime>{y:04}-{mo:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}</datetime><divenumber>{}</divenumber></informationbeforedive>\n",
-            di + 1
+            dive.number
         );
 
         // Cylinders: one <tankdata> each, referencing a global mix.
@@ -710,6 +755,8 @@ pub fn run_parse(
     out_path: &str,
     model_name: &str,
     format: &str,
+    since: Option<&str>,
+    last: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read(in_path)?;
     println!("Read {} bytes from {in_path}.", data.len());
@@ -720,32 +767,49 @@ pub fn run_parse(
     }
     println!("Found {} dive(s).\n", records.len());
 
+    // Parse all dives in chronological order and assign stable numbers.
     let mut dives = Vec::new();
     for (i, rec) in records.iter().enumerate() {
         match parse_dive(rec) {
-            Ok(dive) => {
-                let (y, mo, d, hh, mm, _ss) = civil(dive.unix_time);
-                println!(
-                    "  dive {:>3}: {:04}-{:02}-{:02} {:02}:{:02}  {:>3} min  max {:>5.1} m  min {:>4.1} C  {}  {} samples",
-                    i + 1,
-                    y, mo, d, hh, mm,
-                    dive.divetime_s / 60,
-                    dive.maxdepth,
-                    dive.temp_min,
-                    if dive.salinity_gl >= 1025 { "salt " } else { "fresh" },
-                    dive.samples.len()
-                );
-                if !dive.cylinders.is_empty() {
-                    let gases: Vec<String> = dive
-                        .cylinders
-                        .iter()
-                        .map(|c| gas_label(c.o2, c.he))
-                        .collect();
-                    println!("           gas: {}", gases.join(", "));
-                }
+            Ok(mut dive) => {
+                dive.number = i + 1;
                 dives.push(dive);
             }
             Err(e) => eprintln!("  dive {}: parse error: {e}", i + 1),
+        }
+    }
+
+    // Apply the optional filters: --since (date) then --last (count).
+    if let Some(s) = since {
+        let ts = parse_since(s)?;
+        dives.retain(|d| d.unix_time >= ts);
+        println!("Filter: keeping dives on/after {s} -> {} dive(s).", dives.len());
+    }
+    if let Some(n) = last {
+        if dives.len() > n {
+            dives.drain(..dives.len() - n);
+        }
+        println!("Filter: keeping the last {n} -> {} dive(s).", dives.len());
+    }
+    if dives.is_empty() {
+        return Err("no dives match the given filter".into());
+    }
+
+    for dive in &dives {
+        let (y, mo, d, hh, mm, _ss) = civil(dive.unix_time);
+        println!(
+            "  dive {:>3}: {:04}-{:02}-{:02} {:02}:{:02}  {:>3} min  max {:>5.1} m  min {:>4.1} C  {}  {} samples",
+            dive.number,
+            y, mo, d, hh, mm,
+            dive.divetime_s / 60,
+            dive.maxdepth,
+            dive.temp_min,
+            if dive.salinity_gl >= 1025 { "salt " } else { "fresh" },
+            dive.samples.len()
+        );
+        if !dive.cylinders.is_empty() {
+            let gases: Vec<String> = dive.cylinders.iter().map(|c| gas_label(c.o2, c.he)).collect();
+            println!("           gas: {}", gases.join(", "));
         }
     }
 
@@ -794,6 +858,22 @@ mod tests {
         assert_eq!(signextend(0b0111_1111, 7), -1); // 7-bit 0x7F -> -1
         assert_eq!(signextend(0b0100_0000, 7), -64);
         assert_eq!(signextend(0, 0), 0);
+    }
+
+    #[test]
+    fn parse_since_and_civil_roundtrip() {
+        assert_eq!(parse_since("2000-01-01").unwrap(), 946_684_800);
+        assert_eq!(parse_since("2023-03-06T18:43:26").unwrap(), 1_678_128_206);
+        assert_eq!(parse_since("2023-03-06 18:43").unwrap(), 1_678_128_180);
+        // inverse of civil for a few values
+        for ts in [946_684_800i64, 1_678_128_206, 1_000_000_000] {
+            let (y, m, d, hh, mm, ss) = civil(ts);
+            assert_eq!(
+                unix_from_civil(y as i64, m as i64, d as i64, hh as i64, mm as i64, ss as i64),
+                ts
+            );
+        }
+        assert!(parse_since("nonsense").is_err());
     }
 
     #[test]

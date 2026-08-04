@@ -38,7 +38,15 @@ cargo test                     # unit test SIR/CRC, non richiedono hardware
 ./target/release/stir4200 download -o dump.bin  # M7: scarica la memoria immersioni su file
 ./target/release/stir4200 parse -i dump.bin -o dives.xml            # M8: dump → XML Subsurface
 ./target/release/stir4200 parse -i dump.bin -o dives.uddf -f uddf  # M8: dump → UDDF (formato standard)
+./target/release/stir4200 parse -i dump.bin --since 2024-01-01     # solo immersioni dopo una data
+./target/release/stir4200 parse -i dump.bin --last 5              # solo le ultime 5 immersioni
 ```
+
+Nota formati: l'**XML nativo** (default) è consigliato — Subsurface lo legge direttamente ed
+è veloce anche su log grandi. L'**UDDF** è uno standard ma Subsurface lo importa via una
+trasformazione XSLT ~O(n²) sui campioni: su log grandi può bloccarsi a lungo (il comando
+avvisa). I filtri `--since DATE` (YYYY-MM-DD, opz. `THH:MM`) e `--last N` valgono per entrambi
+i formati e preservano i numeri d'immersione originali.
 
 Su macOS, se il dispositivo non viene trovato, controllare che sia collegato con
 `system_profiler SPUSBDataType` o `ioreg -p IOUSB`.
