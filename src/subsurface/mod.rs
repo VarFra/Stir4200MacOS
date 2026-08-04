@@ -113,9 +113,17 @@ struct Dive {
     maxdepth: f64,
     temp_min: f64,
     salinity_gl: u32,   // water salinity in g/l (1000 fresh, 1025 salt)
-    gasmixes: Vec<(f64, f64)>, // (o2 fraction, he fraction)
+    cylinders: Vec<Cylinder>,
     gas_changes: Vec<(u32, usize, f64, f64)>, // (time_s, cylinder, o2, he)
     samples: Vec<Sample>,
+}
+
+#[derive(Clone, Copy)]
+struct Cylinder {
+    o2: f64,        // fraction
+    he: f64,        // fraction
+    begin_bar: f64, // 0 = unknown
+    end_bar: f64,   // 0 = unknown
 }
 
 /// Header-offset table (subset we need).
@@ -127,6 +135,7 @@ struct Header {
     timezone: usize,
     settings: usize,
     gasmix: Option<usize>,
+    tankpressure: Option<usize>,
     ngases: usize,
 }
 
@@ -170,6 +179,7 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
             timezone: 16,
             settings: 68,
             gasmix: None,
+            tankpressure: None,
             ngases: 0,
         }
     } else {
@@ -181,6 +191,7 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
             timezone: 16,
             settings: 92,
             gasmix: Some(44),
+            tankpressure: Some(50),
             ngases: 3,
         }
     };
@@ -211,15 +222,33 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
     let maxdepth = u16_le(rec, header.maxdepth) as f64 * (BAR / 1000.0) / (density * 10.0);
     let temp_min = (u16_le(rec, header.temp_minimum) as i16) as f64 / 10.0;
 
-    // Gas mixes. Galileo-mode dives carry them in the header; trimix-mode dives
-    // report them via MISC samples (parsed in the loop below). Tracked as
-    // (mixid, o2 fraction, he fraction), de-duplicated by mixid.
-    let mut mixes: Vec<(u32, f64, f64)> = Vec::new();
+    // Gas mixes. Galileo-mode dives carry them (and tank pressures) in the
+    // header; trimix-mode dives report them via MISC samples (parsed in the loop
+    // below). Tracked as (mixid, o2, he, begin_bar, end_bar), deduped by mixid.
+    // Tank pressures are raw/128 bar (`uwatec_smart_parser.c:802`); 0/0xFFFF
+    // mean "unknown".
+    let mut mixes: Vec<(u32, f64, f64, f64, f64)> = Vec::new();
+    let pbar = |raw: u16| -> f64 {
+        if raw == 0 || raw == 0xFFFF {
+            0.0
+        } else {
+            raw as f64 / 128.0
+        }
+    };
     if let Some(gm) = header.gasmix {
         for i in 0..header.ngases {
             let o2 = u16_le(rec, gm + i * 2);
             if o2 != 0 {
-                mixes.push((i as u32, o2 as f64 / 100.0, 0.0));
+                // Galileo tank-pressure layout (`uwatec_smart_parser.c:540`):
+                // end at tp+2i, begin at tp+2i+2*ngases.
+                let (mut begin, mut end) = (0.0, 0.0);
+                if !freedive {
+                    if let Some(tp) = header.tankpressure {
+                        end = pbar(u16_le(rec, tp + 2 * i));
+                        begin = pbar(u16_le(rec, tp + 2 * i + 2 * header.ngases));
+                    }
+                }
+                mixes.push((i as u32, o2 as f64 / 100.0, 0.0, begin, end));
             }
         }
     }
@@ -353,8 +382,10 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
                     let mixid = (subtype - 32) as u32;
                     let o2 = u16_le(rec, offset + 1);
                     let he = u16_le(rec, offset + 3);
+                    let begin = pbar(u16_le(rec, offset + 5));
+                    let end = pbar(u16_le(rec, offset + 7));
                     if (o2 != 0 || he != 0) && !mixes.iter().any(|m| m.0 == mixid) {
-                        mixes.push((mixid, o2 as f64 / 100.0, he as f64 / 100.0));
+                        mixes.push((mixid, o2 as f64 / 100.0, he as f64 / 100.0, begin, end));
                     }
                 }
                 offset += len - 1;
@@ -409,7 +440,15 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
         .collect();
 
     mixes.sort_by_key(|m| m.0);
-    let gasmixes = mixes.iter().map(|m| (m.1, m.2)).collect();
+    let cylinders = mixes
+        .iter()
+        .map(|m| Cylinder {
+            o2: m.1,
+            he: m.2,
+            begin_bar: m.3,
+            end_bar: m.4,
+        })
+        .collect();
 
     Ok(Dive {
         unix_time,
@@ -417,7 +456,7 @@ fn parse_dive(rec: &[u8]) -> Result<Dive, String> {
         maxdepth,
         temp_min,
         salinity_gl: if salt { 1025 } else { 1000 },
-        gasmixes,
+        cylinders,
         gas_changes,
         samples,
     })
@@ -465,14 +504,19 @@ fn write_xml(dives: &[Dive], model_name: &str) -> String {
             dur_s
         );
 
-        for (ci, (o2, he)) in dive.gasmixes.iter().enumerate() {
-            let _ = write!(
-                out,
-                "  <cylinder o2='{:.1}%' he='{:.1}%' description='mix {}' />\n",
-                o2 * 100.0,
-                he * 100.0,
-                ci + 1
-            );
+        for (ci, cyl) in dive.cylinders.iter().enumerate() {
+            let _ = write!(out, "  <cylinder o2='{:.1}%'", cyl.o2 * 100.0);
+            if cyl.he > 0.0 {
+                let _ = write!(out, " he='{:.1}%'", cyl.he * 100.0);
+            }
+            let _ = write!(out, " description='mix {}'", ci + 1);
+            if cyl.begin_bar > 0.0 {
+                let _ = write!(out, " start='{:.0} bar'", cyl.begin_bar);
+            }
+            if cyl.end_bar > 0.0 {
+                let _ = write!(out, " end='{:.0} bar'", cyl.end_bar);
+            }
+            out.push_str(" />\n");
         }
 
         let _ = write!(
@@ -576,11 +620,11 @@ pub fn run_parse(
                     if dive.salinity_gl >= 1025 { "salt " } else { "fresh" },
                     dive.samples.len()
                 );
-                if !dive.gasmixes.is_empty() {
+                if !dive.cylinders.is_empty() {
                     let gases: Vec<String> = dive
-                        .gasmixes
+                        .cylinders
                         .iter()
-                        .map(|(o2, he)| gas_label(*o2, *he))
+                        .map(|c| gas_label(c.o2, c.he))
                         .collect();
                     println!("           gas: {}", gases.join(", "));
                 }
