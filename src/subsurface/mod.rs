@@ -756,6 +756,18 @@ pub fn run_parse(
     std::fs::write(out_path, content)?;
     println!("\nM8: wrote {} dive(s) to {out_path} ({kind}).", dives.len());
     println!("  Import in Subsurface via: File → Import → Import Log Files.");
+
+    if format == "uddf" {
+        let total_samples: usize = dives.iter().map(|d| d.samples.len()).sum();
+        if total_samples > 5000 {
+            println!(
+                "  NOTE: Subsurface imports UDDF through an XSLT transform that scales poorly \
+                 (~O(n^2) in samples/dive); with {total_samples} samples it may freeze for a long \
+                 time. For large logs prefer the XML format (-f xml), which Subsurface parses \
+                 directly and quickly."
+            );
+        }
+    }
     Ok(())
 }
 
