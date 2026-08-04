@@ -569,6 +569,120 @@ fn write_xml(dives: &[Dive], model_name: &str) -> String {
     out
 }
 
+/// Write a UDDF 3.2.0 document (the format Subsurface imports via its UDDF
+/// XSLT). Units are SI: metres, seconds, Kelvin, Pascal, and gas fractions.
+/// Element names/paths match Subsurface's `xslt/uddf.xslt` (namespace-less).
+/// Note: the Subsurface UDDF importer does not read water salinity.
+fn write_uddf(dives: &[Dive]) -> String {
+    // Global gas-mix table (deduplicated by o2/he permille), referenced by id.
+    let key = |o2: f64, he: f64| ((o2 * 1000.0).round() as i64, (he * 1000.0).round() as i64);
+    let mut mixes: Vec<(i64, i64)> = Vec::new();
+    for d in dives {
+        for c in &d.cylinders {
+            let k = key(c.o2, c.he);
+            if !mixes.contains(&k) {
+                mixes.push(k);
+            }
+        }
+        for gc in &d.gas_changes {
+            let k = key(gc.2, gc.3);
+            if !mixes.contains(&k) {
+                mixes.push(k);
+            }
+        }
+    }
+    let mix_id = |o2: f64, he: f64| mixes.iter().position(|&k| k == key(o2, he)).unwrap_or(0);
+
+    let mut out = String::new();
+    out.push_str("<uddf version='3.2.0'>\n");
+    out.push_str("<generator><name>stir4200</name></generator>\n");
+
+    out.push_str("<gasdefinitions>\n");
+    for (i, (o2p, hep)) in mixes.iter().enumerate() {
+        let (o2, he) = (*o2p as f64 / 1000.0, *hep as f64 / 1000.0);
+        let _ = write!(
+            out,
+            "  <mix id='mix{i}'><name>{}</name><o2>{:.4}</o2><he>{:.4}</he></mix>\n",
+            gas_label(o2, he),
+            o2,
+            he
+        );
+    }
+    out.push_str("</gasdefinitions>\n");
+
+    out.push_str("<profiledata>\n<repetitiongroup>\n");
+    for (di, dive) in dives.iter().enumerate() {
+        let (y, mo, d, hh, mm, ss) = civil(dive.unix_time);
+        out.push_str("<dive>\n");
+        let _ = write!(
+            out,
+            "  <informationbeforedive><datetime>{y:04}-{mo:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}</datetime><divenumber>{}</divenumber></informationbeforedive>\n",
+            di + 1
+        );
+
+        // Cylinders: one <tankdata> each, referencing a global mix.
+        for cyl in &dive.cylinders {
+            let id = mix_id(cyl.o2, cyl.he);
+            let _ = write!(out, "  <tankdata><link ref='mix{id}'/>");
+            if cyl.begin_bar > 0.0 {
+                let _ = write!(
+                    out,
+                    "<tankpressurebegin>{:.0}</tankpressurebegin>",
+                    cyl.begin_bar * 100000.0
+                );
+            }
+            if cyl.end_bar > 0.0 {
+                let _ = write!(
+                    out,
+                    "<tankpressureend>{:.0}</tankpressureend>",
+                    cyl.end_bar * 100000.0
+                );
+            }
+            out.push_str("</tankdata>\n");
+        }
+
+        out.push_str("  <samples>\n");
+        // Gas-change waypoints (no depth: consumed only as gaschange events).
+        for (t, _cyl, o2, he) in &dive.gas_changes {
+            let id = mix_id(*o2, *he);
+            let _ = write!(
+                out,
+                "    <waypoint><divetime>{t}</divetime><switchmix ref='mix{id}'/></waypoint>\n"
+            );
+        }
+        // Profile waypoints.
+        for s in &dive.samples {
+            let _ = write!(
+                out,
+                "    <waypoint><divetime>{}</divetime><depth>{:.2}</depth>",
+                s.time,
+                s.depth.max(0.0)
+            );
+            if let Some(t) = s.temp {
+                let _ = write!(out, "<temperature>{:.2}</temperature>", t + 273.15);
+            }
+            if let Some(p) = s.pressure {
+                if p > 0.0 {
+                    let _ = write!(out, "<tankpressure>{:.0}</tankpressure>", p * 100000.0);
+                }
+            }
+            out.push_str("</waypoint>\n");
+        }
+        out.push_str("  </samples>\n");
+
+        let _ = write!(
+            out,
+            "  <informationafterdive><greatestdepth>{:.2}</greatestdepth><diveduration>{}</diveduration><lowesttemperature>{:.2}</lowesttemperature></informationafterdive>\n",
+            dive.maxdepth,
+            dive.divetime_s,
+            dive.temp_min + 273.15
+        );
+        out.push_str("</dive>\n");
+    }
+    out.push_str("</repetitiongroup>\n</profiledata>\n</uddf>\n");
+    out
+}
+
 /// Human-readable gas label (air / nitrox / trimix) from O2/He fractions.
 fn gas_label(o2: f64, he: f64) -> String {
     let o2p = (o2 * 100.0).round() as i32;
@@ -595,6 +709,7 @@ pub fn run_parse(
     in_path: &str,
     out_path: &str,
     model_name: &str,
+    format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read(in_path)?;
     println!("Read {} bytes from {in_path}.", data.len());
@@ -634,9 +749,12 @@ pub fn run_parse(
         }
     }
 
-    let xml = write_xml(&dives, model_name);
-    std::fs::write(out_path, xml)?;
-    println!("\nM8: wrote {} dive(s) to {out_path} (Subsurface XML).", dives.len());
+    let (content, kind) = match format {
+        "uddf" => (write_uddf(&dives), "UDDF"),
+        _ => (write_xml(&dives, model_name), "Subsurface XML"),
+    };
+    std::fs::write(out_path, content)?;
+    println!("\nM8: wrote {} dive(s) to {out_path} ({kind}).", dives.len());
     println!("  Import in Subsurface via: File → Import → Import Log Files.");
     Ok(())
 }

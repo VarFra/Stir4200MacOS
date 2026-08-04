@@ -35,7 +35,8 @@ COMMANDS:
                          with RR keepalives.
     download             M7: connect, run the Uwatec Smart protocol, and save the
                          raw dive memory to a file (--out).
-    parse                M8: parse a raw dump (--in) into Subsurface XML (--out).
+    parse                M8: parse a raw dump (--in) into a dive log (--out),
+                         Subsurface XML or UDDF (--format).
 
 OPTIONS:
     -v, --verbose        increase verbosity (repeatable: -v, -vv, -vvv)
@@ -49,6 +50,7 @@ OPTIONS:
     -o, --out FILE       output file: dump for `download` (default dump.bin),
                          XML for `parse` (default dives.xml)
     -i, --in FILE        input dump for `parse` (default dump.bin)
+    -f, --format FMT     `parse` output format: xml (default) or uddf
     -h, --help           show this help
 ";
 
@@ -75,6 +77,7 @@ struct Args {
     retries: u32,
     out: Option<String>,
     input: String,
+    format: String,
     command: Command,
 }
 
@@ -89,6 +92,7 @@ fn parse_args() -> Result<Args, String> {
     let mut retries: u32 = 3;
     let mut out: Option<String> = None;
     let mut input = String::from("dump.bin");
+    let mut format = String::from("xml");
     let mut command = Command::Enumerate;
     let mut verbosity: u8 = 0;
 
@@ -151,6 +155,11 @@ fn parse_args() -> Result<Args, String> {
                     .next()
                     .ok_or_else(|| "--in requires a file path".to_string())?;
             }
+            "-f" | "--format" => {
+                format = it
+                    .next()
+                    .ok_or_else(|| "--format requires xml or uddf".to_string())?;
+            }
             "enumerate" => command = Command::Enumerate,
             "init" => command = Command::Init,
             "tx" => command = Command::Tx,
@@ -180,6 +189,7 @@ fn parse_args() -> Result<Args, String> {
         retries,
         out,
         input,
+        format,
         command,
     })
 }
@@ -222,11 +232,19 @@ fn main() {
             args.speed,
             args.out.as_deref().unwrap_or("dump.bin"),
         ),
-        Command::Parse => subsurface::run_parse(
-            &args.input,
-            args.out.as_deref().unwrap_or("dives.xml"),
-            "Uwatec Galileo",
-        ),
+        Command::Parse => {
+            let default_out = if args.format == "uddf" {
+                "dives.uddf"
+            } else {
+                "dives.xml"
+            };
+            subsurface::run_parse(
+                &args.input,
+                args.out.as_deref().unwrap_or(default_out),
+                "Uwatec Galileo",
+                &args.format,
+            )
+        }
     };
     if let Err(e) = result {
         error!("{e}");

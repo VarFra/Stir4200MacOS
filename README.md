@@ -36,7 +36,8 @@ cargo test                     # unit test SIR/CRC, non richiedono hardware
 ./target/release/stir4200 discover -v  # M5: discovery IrLAP (XID) del computer subacqueo
 ./target/release/stir4200 connect -v   # M6: connessione IrLAP (SNRM/UA) + keepalive 30s
 ./target/release/stir4200 download -o dump.bin  # M7: scarica la memoria immersioni su file
-./target/release/stir4200 parse -i dump.bin -o dives.xml  # M8: converte il dump in XML Subsurface
+./target/release/stir4200 parse -i dump.bin -o dives.xml            # M8: dump → XML Subsurface
+./target/release/stir4200 parse -i dump.bin -o dives.uddf -f uddf  # M8: dump → UDDF (formato standard)
 ```
 
 Su macOS, se il dispositivo non viene trovato, controllare che sia collegato con
